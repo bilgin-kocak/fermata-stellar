@@ -35,3 +35,7 @@ panic = "abort"
 codegen-units = 1
 lto = true
 
+# Tests run the Soroban host natively. Optimizing dependencies (not the workspace crates) makes
+# the randomized suites several times faster.
+[profile.dev.package."*"]
+opt-level = 3

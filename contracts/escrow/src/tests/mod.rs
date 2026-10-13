@@ -8,7 +8,9 @@ mod setup;
 
 mod admin;
 mod hold;
+mod invariants;
 mod lifecycle;
+mod props;
 mod register;
 mod settle;
 mod tokens;
