@@ -1,0 +1,9 @@
+{
+  "network": "testnet",
+  "network_passphrase": "Test SDF Network ; September 2015",
+  "status": "not deployed yet: the build environment cannot reach Stellar testnet. Run scripts/deploy-testnet.sh, which overwrites this file (README, Live on testnet).",
+  "escrow": null,
+  "token": null,
+  "service": null,
+  "accounts": null
+}

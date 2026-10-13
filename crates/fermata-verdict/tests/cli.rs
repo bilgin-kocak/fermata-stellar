@@ -161,6 +161,8 @@ fn service_id_and_hash_commands_match_the_vectors() {
         None,
     ));
     assert_eq!(id.trim(), doc.service.service_id);
+    let label = stdout(&run(&["label", &doc.service.label_text], None));
+    assert_eq!(label.trim(), doc.service.label);
 
     let h = &doc.hashes.request_hash;
     let rh = stdout(&run(

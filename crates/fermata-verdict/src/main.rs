@@ -53,6 +53,8 @@ enum Command {
         #[arg(long)]
         signature: String,
     },
+    /// Print a label (up to 12 ASCII bytes) as the 12-byte hex `register_service` takes.
+    Label { text: String },
     /// Derive a service id from its owner (G… or C…) and label (up to 12 ASCII bytes, or 0x + 24 hex).
     ServiceId {
         #[arg(long)]
@@ -177,6 +179,10 @@ fn main() -> Result<()> {
             let signature = parse_hex::<64>(&signature).context("--signature")?;
             verdict::verify(&public_key, &domain, &verdict, &signature)?;
             println!("valid");
+            Ok(())
+        }
+        Command::Label { text } => {
+            println!("{}", to_hex(&service::label(&text)?));
             Ok(())
         }
         Command::ServiceId { owner, label } => {

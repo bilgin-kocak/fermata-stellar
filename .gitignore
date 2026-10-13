@@ -11,3 +11,6 @@ test_snapshots/
 
 # Script output
 /out
+
+# Deployments to a local quickstart network are throwaway
+deployments/local.json
