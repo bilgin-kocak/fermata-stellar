@@ -10,6 +10,13 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Optional overrides (see .env.example); .env is git-ignored.
+if [ -f "$ROOT/.env" ]; then
+  set -a
+  # shellcheck source=/dev/null
+  . "$ROOT/.env"
+  set +a
+fi
 NETWORK="${NETWORK:-testnet}"
 KEY_PREFIX="${KEY_PREFIX:-fermata}"
 DEPLOYMENT="${DEPLOYMENT:-$ROOT/deployments/$NETWORK.json}"

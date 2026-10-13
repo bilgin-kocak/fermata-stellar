@@ -1,0 +1,36 @@
+Fermata on Stellar
+Copyright 2026 Bilgin Kocak
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This repository ports code and text from two earlier projects by the same author. Each ported
+file names its source in a header comment.
+
+Fermata (github.com/bilgin-kocak/fermata) @ d7cc642, MIT License, Copyright (c) 2026 Bilgin Kocak:
+  - contracts/escrow: a Soroban port of contracts/src/FermataEscrow.sol; the tests port
+    contracts/test/*.t.sol case by case
+  - crates/fermata-verdict/src/verdict.rs and hex32.rs: the Verdict type, outcome constants and
+    hex serde helpers from apps/attestor/src/eip712.rs
+  - crates/fermata-verdict/src/hashes.rs: apps/attestor/src/hashes.rs and its test vectors
+  - predicates/quote-v1.json: apps/attestor/predicates/quote-v1.json, byte for byte
+  - docs/trust-model.md, docs/security.md, README.md: text adapted from README.md and SECURITY.md
+
+  The MIT License text for the ported portions:
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy of this software
+  and associated documentation files (the "Software"), to deal in the Software without
+  restriction, including without limitation the rights to use, copy, modify, merge, publish,
+  distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the
+  Software is furnished to do so, subject to the following conditions: The above copyright
+  notice and this permission notice shall be included in all copies or substantial portions of
+  the Software. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+  PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+  LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+  OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+  IN THE SOFTWARE.
+
+WebProof (github.com/bilgin-kocak/webproof-solana) @ 609a654, Apache License 2.0:
+  - the domain-separated claim pattern (a versioned ASCII tag followed by canonical bytes,
+    signed with Ed25519, pinned by a text vector file) from crates/webproof-core/src/lib.rs
+  - docs/trust-model.md: structure and wording adapted from docs/trust-model.md
