@@ -1,0 +1,28 @@
+[package]
+name = "fermata-verdict"
+description = "Fermata on Stellar: canonical verdict encoding, Ed25519 verdict signing and registration hashes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+name = "fermata_verdict"
+
+[[bin]]
+name = "fermata-verdict"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+ed25519-dalek.workspace = true
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sha3.workspace = true
+stellar-strkey.workspace = true
+thiserror.workspace = true

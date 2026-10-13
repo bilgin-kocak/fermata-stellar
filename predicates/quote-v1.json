@@ -1,0 +1,1 @@
+{"version":1,"status":[200],"maxBodyBytes":4096,"contentType":"application/json","jsonSchema":{"type":"object","required":["price","timestamp"],"properties":{"price":{"type":"number"},"timestamp":{"type":"number"}}}}
