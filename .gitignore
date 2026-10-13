@@ -1,0 +1,13 @@
+# Rust
+/target
+
+# Soroban test snapshots (regenerated on every test run)
+test_snapshots/
+
+# Local secrets and Stellar CLI state: identities live in the CLI keystore, never in the repo
+.env
+.stellar/
+*.secret
+
+# Script output
+/out
