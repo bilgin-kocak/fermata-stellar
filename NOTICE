@@ -14,6 +14,11 @@ Fermata (github.com/bilgin-kocak/fermata) @ d7cc642, MIT License, Copyright (c) 
   - crates/fermata-verdict/src/hashes.rs: apps/attestor/src/hashes.rs and its test vectors
   - predicates/quote-v1.json: apps/attestor/predicates/quote-v1.json, byte for byte
   - docs/trust-model.md, docs/security.md, README.md: text adapted from README.md and SECURITY.md
+  - apps/vendor: apps/vendor/server.mjs and gen-certs.sh, unchanged
+  - packages/sdk: src/hashes.ts and src/requestHash.ts from packages/sdk (same definitions), the
+    isTrustedService check and the Verdict fields, and the hash vectors in its tests
+  - scripts/attest-cases.sh: ported from scripts/e2e-attest.sh and scripts/attest-e2e.ts
+  - contracts/escrow/src/tests/attest_vector.rs: ports contracts/test/AttestVector.t.sol
 
   The MIT License text for the ported portions:
 
@@ -29,6 +34,13 @@ Fermata (github.com/bilgin-kocak/fermata) @ d7cc642, MIT License, Copyright (c) 
   LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
   OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
   IN THE SOFTWARE.
+
+Fermata's attestor (github.com/bilgin-kocak/fermata, apps/attestor) @ d7cc642, Apache License 2.0:
+  - apps/attestor: prove.rs, notary.rs, tunnel.rs, http_raw.rs, predicate.rs and config.rs copied;
+    verify.rs, serve.rs, main.rs and tests/attest.rs adapted; chain.rs replaced, keeping its
+    ChainView trait, MockChain and JSON-RPC transport; Cargo.lock extended. Its TLSNotary code
+    comes from WebProof and the upstream tlsn `attestation` example at v0.1.0-alpha.15
+    (github.com/tlsnotary/tlsn, MIT or Apache-2.0).
 
 WebProof (github.com/bilgin-kocak/webproof-solana) @ 609a654, Apache License 2.0:
   - the domain-separated claim pattern (a versioned ASCII tag followed by canonical bytes,

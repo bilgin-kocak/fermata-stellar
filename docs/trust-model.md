@@ -6,8 +6,11 @@ Stellar today.
 
 ## In one paragraph
 
-The escrow trusts one Ed25519 verifier key per service. In Milestone 0 that key signs verdicts
-directly: no TLSNotary proof is produced or checked. The contract still enforces several things:
+The escrow trusts one Ed25519 verifier key per service. Since Milestone 1 that key lives in the
+attestor, which signs only after verifying a TLSNotary presentation of the vendor's HTTPS response
+and checking it against the hold and the service it reads from the escrow. (In Milestone 0 the key
+signed verdicts directly, with no proof; `scripts/demo-cases.sh` still does, as a baseline.) The
+contract enforces several things:
 
 - only the key the service pinned can settle a hold;
 - the verdict must be for this call, this service, this request and this predicate, on this
@@ -15,11 +18,11 @@ directly: no TLSNotary proof is produced or checked. The contract still enforces
 - it must land inside the settlement window;
 - without one, anyone can refund the agent after the window.
 
-What the contract cannot check is whether a verdict is true. From Milestone 1 the key moves into
-the attestor, which signs only after verifying a TLSNotary presentation of the vendor's HTTPS
-response. Every verdict then points at evidence that anyone can re-verify offline. A dishonest
-verdict becomes detectable, though not prevented: the trust-minimization items at the end are
-about prevention.
+What the contract cannot check is whether a verdict is true. Every attestor verdict points at a
+presentation that anyone can re-verify offline against the hashes the escrow stores, so a
+dishonest verdict is detectable, though not prevented. In this milestone the attestor's operator
+also runs the notary, so the evidence is only as independent as that operator (see "Who runs the
+notary"). The trust-minimization items at the end are about prevention.
 
 ## Parties
 
@@ -30,7 +33,8 @@ about prevention.
 | Verifier | Signs DELIVERED or FAILED verdicts for the services that pin its public key | Ed25519 key, used for verdicts only |
 | Relayer | Submits `settle` or `claim_timeout`; can be anyone, gains nothing | Any Stellar account |
 | Escrow owner | Changes the fee (at most 5 %) and the treasury | Stellar account |
-| Attestor, notary (Milestone 1) | Prove the vendor's HTTPS response with TLSNotary; the attestor holds the verifier key | not on Stellar in M0 |
+| Attestor (`fermata-attest`) | Proves the vendor's HTTPS response with TLSNotary, checks it against the escrow, signs the verdict | The verifier key; no Stellar account (it reads the escrow by simulation) |
+| Notary | Takes part in MPC-TLS without seeing plaintext and signs an attestation of the commitments | A secp256k1 key, pinned per service by its hash |
 
 ## What the contract enforces
 
@@ -62,9 +66,9 @@ about prevention.
 ## What the contract trusts
 
 - **The verifier key, for the decision.** A service's verifier decides between DELIVERED (the
-  vendor is paid) and FAILED (the agent is refunded). In Milestone 0 nothing backs that decision.
-  The verifier is the party that signs, and in the demo it is operated by whoever runs the
-  scripts.
+  vendor is paid) and FAILED (the agent is refunded). The attestor backs each decision with a
+  presentation that passed the seven binding checks and the predicate, but the contract sees only
+  the signature. In the demo the verifier is operated by whoever runs the scripts.
 - **The token contract.**
   - Each service names its token. The demo uses Circle's USDC Stellar Asset Contract on testnet,
     or a self-issued test asset.
@@ -75,18 +79,18 @@ about prevention.
 
 ## What the parties trust
 
-- **A vendor** trusts the verifier to sign DELIVERED when it delivered. From Milestone 1, a
-  DELIVERED verdict needs a presentation that passes the predicate the vendor registered.
+- **A vendor** trusts the verifier to sign DELIVERED when it delivered. The attestor signs
+  DELIVERED when the presentation passes the predicate the vendor registered.
 - **An agent** trusts the verifier not to sign DELIVERED for a failed call, and chooses which
-  escrows and verifiers it pays into. Fermata's Tempo SDK enforces an allow-list of escrows and
-  verifier keys before paying; the Stellar SDK is planned for Milestone 1.
+  escrows and verifiers it pays into. The TypeScript SDK's `isTrustedService` checks a service's
+  verifier key (and optionally its token) against the agent's allow-list before it holds money;
+  the M2 gateway client will enforce it, as Fermata's Tempo SDK does.
 - **Both** rely on the timeout. An agent whose call got no verdict is refunded after the window,
   without anyone's cooperation.
 
-## What the proof does and does not establish (from Milestone 1)
+## What the proof does and does not establish
 
-Ported from Fermata's README. These limits apply once the TLSNotary attestor is ported. In
-Milestone 0 there is no proof at all, only the verifier's signature.
+Ported from Fermata's README. The attestor here is Fermata's, so the same limits apply.
 
 - **What a presentation proves.** A TLSNotary presentation establishes that a specific HTTPS
   server, identified by its TLS certificate, sent specific bytes in response to specific request
@@ -108,14 +112,15 @@ Milestone 0 there is no proof at all, only the verifier's signature.
     and, in a dispute, an auditor. Second, selective disclosure (TLSNotary can reveal chosen parts
     of a transcript and keep the rest hidden).
 
-## Who runs the notary and the prover (from Milestone 1)
+## Who runs the notary and the prover
 
-In Fermata's Tempo demo, the prover runs inside the attestor and the notary is a separate
-process, both run by the operator. A prover and a notary run by the same party could collude to
-produce a presentation for bytes the server never sent. Offline re-verification shows the
-evidence is consistent with the chain; it becomes evidence independent of the operator only when
-someone else runs the notary. Each service pins a notary key hash, so another notary is used by
-registering a service with its key.
+The prover runs inside the attestor and the notary is a separate process, both run by the
+operator. That is how Fermata's Tempo demo works, and how `scripts/attest-cases.sh` works here; the
+script makes a new notary key for each run and registers services that pin it. A prover and a
+notary run by the same party could collude to produce a presentation for bytes the server never
+sent. Offline re-verification shows the evidence is consistent with the chain; it becomes evidence
+independent of the operator only when someone else runs the notary. Each service pins a notary key
+hash, so another notary is used by registering a service with its key.
 
 ## Trust minimization (planned)
 

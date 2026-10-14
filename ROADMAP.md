@@ -1,8 +1,8 @@
 # Roadmap
 
-The milestones follow the Stellar Community Fund's tranche structure. Milestone 0 is this
-repository today. Everything after it is planned and not built yet. Each milestone ends with
-something a reviewer can run.
+The milestones follow the Stellar Community Fund's tranche structure. Milestones 0 and 1 are
+this repository today; their testnet runs are pending. Everything after them is planned and not
+built yet. Each milestone ends with something a reviewer can run.
 
 ## M0 — The escrow on Stellar (done)
 
@@ -14,29 +14,41 @@ something a reviewer can run.
 - **Tests.**
   - Fermata's Solidity suite, ported case by case.
   - The rejection matrix, event and authorization checks, TTL and archival.
-  - Randomized properties and invariants (85 tests in the workspace).
+  - Randomized properties and invariants (85 tests in the workspace at the end of M0).
 - **Scripts.** `scripts/deploy-testnet.sh` and `scripts/demo-cases.sh`. They run 3/3 on a local
   network. The testnet run is pending, because the build environment cannot reach testnet; the
   README has the exact commands.
 
 In M0 the verifier key signs verdicts directly; no TLSNotary proof is involved yet.
 
-## M1 — MVP: proofs on Stellar
+## M1 — MVP: proofs on Stellar (done, except the testnet run)
 
-- **Port `fermata-attest`** (Rust, TLSNotary `v0.1.0-alpha.15`) into its own workspace pinned to
-  Rust 1.95.0, as in Fermata.
+- **`fermata-attest`, ported** (`apps/attestor`), in its own workspace pinned to Rust 1.95.0 with
+  TLSNotary `v0.1.0-alpha.15`, as in Fermata.
   - **Unchanged:** TLSNotary proving, the notary, the seven binding checks (notary, origin,
     request, predicate, hold, call id, session time) and the predicates.
-  - **Replaced:** the EIP-712 signer becomes `fermata-verdict`, and the `eth_call` chain reader
-    becomes Soroban RPC reads of `get_hold`, `get_service` and the ledger time.
-- **Run the full proof path on Stellar testnet** for the three canonical cases: hold → MPC-TLS
-  proof → verdict → settle. Every verdict must re-verify offline against the on-chain values with
-  `verify --offline`.
-- **TypeScript SDK bindings** for the escrow, with golden-vector parity: the same verdict message,
-  service id and request hash as `test-vectors/verdict-v1.json`.
+  - **Replaced:** the EIP-712 signer is `fermata-verdict`, and the `eth_call` chain reader is
+    Soroban RPC simulation of `get_hold` and `get_service`, plus the latest ledger's close time.
+  - **Tested** with real MPC-TLS sessions against the demo vendor and one negative case per
+    binding check. The verdicts it signed settle on the escrow (`test-vectors/attest-v1.json`, the
+    port of Fermata's `AttestVector` tests).
+- **The full proof path for the three canonical cases** (`scripts/attest-cases.sh`):
+  - hold → MPC-TLS proof → verdict → settle;
+  - every settled verdict's presentation re-verifies offline (`verify --offline`) against the
+    hashes on chain;
+  - an old proof cannot settle a new hold.
+
+  It passes 3/3 on a local network (protocol 29) and in CI. **The testnet run is pending:** the
+  build environment cannot reach testnet, and the README has the commands.
+- **TypeScript SDK** (`packages/sdk`), with golden-vector parity:
+  - the typed escrow client the Stellar CLI generates;
+  - the verdict message and Ed25519 signatures;
+  - the service id and request hash, as in `test-vectors/verdict-v1.json`.
+
+  A live test checks a deployment's views against it.
 
 Done when the three cases pass on testnet with real presentations and their offline
-re-verification matches the chain.
+re-verification matches the chain. Everything but the testnet run is in place.
 
 ## M2 — Testnet product: the gateway on Stellar
 
