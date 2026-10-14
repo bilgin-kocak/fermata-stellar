@@ -579,3 +579,48 @@ started (decision 4).
   120 s window. Neither has been measured on testnet.
 - **Not tried yet:** testnet, OpenZeppelin's hosted Channels service and x402 facilitator, and
   Circle's USDC faucet. The build environment's network policy refuses all of them.
+
+## 11. Session escrow, phase 1: what the implementation showed
+
+Written when phase 1 was built (every call proved, k = 1). Sessions are new in this repository:
+Fermata on Tempo has none, so nothing here is ported. The design is
+[`session-escrow.md`](session-escrow.md), approved with decisions 2 to 4 on 2026-10-14.
+
+- **What was reused.**
+  - **Unchanged:** the escrow and the verdict.
+  - **Reused in the new code:**
+    - the attestor's proving, notary, binding checks and predicates, for each session call;
+    - the helpers behind the sponsor's checks of a hold (the authorization entry's credentials
+      and signature, the simulation's events), in `checkSponsoredOpen`;
+    - the gateway's sweeper, which now also settles and closes sessions, and the SDK's indexer,
+      which also follows the session contract.
+
+    The gateway's session store is new, modelled on its store of calls.
+  - **How the session contract reads the escrow:** through its own copy of the escrow's `Service`
+    type, so the escrow needed no new function.
+- **Cost.** Measured on the Wasm and on a local network; section 10 of `session-escrow.md` has the
+  numbers. At B = 1,000 the transaction's size is the closest limit, not CPU.
+- **MPC setup stalls, twice in CI.** The attestor cuts off an attempt whose MPC setup stalls
+  (inside TLSNotary) and retries it.
+  - **Run 20.** Two attempts in a row stalled before the first proof of `attestor_end_to_end`, so
+    that proof took 10.9 s, over the test's 10 s bound, although the retry worked. The bound now
+    allows for retried attempts (section 9).
+  - **Run 21.** All three attempts of the third session call in `gateway-cases.sh` stalled. The
+    attestor recorded the call UNANSWERED, the gateway settled it as a refund and the session
+    reconciled, all as designed, but the case expected DELIVERED.
+  - **A measurement.** A 40-proof soak (`soak` in `apps/attestor/tests/attest.rs`, 5 s setup
+    timeout) on a 4-vCPU machine running a local network: 9 of 49 attempts stalled, and every
+    retry after a stall succeeded. While an attempt is stalled the notary uses no CPU, so the
+    stall is a wait on both sides, not a lack of CPU.
+  - **The change.** At that rate, 3 attempts leave about 1 proof in 160 with no transcript. The
+    scripts that start an attestor now give it 5 attempts (`ATTEST_ATTEMPTS` in
+    `scripts/lib.sh`), where Fermata's scripts give 3. The attestor's own default stays 3. In a
+    local run of `gateway-cases.sh` after the change, 3 of its 7 proofs needed a second attempt,
+    and all its checks passed.
+- **Reconciling a shared session contract.** One session contract serves every service of its
+  escrow, but a gateway knows only its own services' tokens, and the contract's events name no
+  token. A local run against a deployment that still had sessions of another service open failed
+  the contract-wide check: their deposits were in the balance but in no token's open deposits.
+  Reconciliation now takes a session's token from its deposit's transfer when the service is not
+  the caller's, and lists a session in a token the index does not follow as untracked.
+- **Not tried yet:** testnet. The build environment's network policy refuses it, as before.

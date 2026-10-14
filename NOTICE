@@ -27,7 +27,8 @@ Fermata (github.com/bilgin-kocak/fermata) @ d7cc642, MIT License, Copyright (c) 
     packages/sdk/src/escrow.ts and the serialized wallet writes in apps/gateway/src/chain.ts
   - apps/gateway: src/app.ts, attestor.ts, chain.ts, config.ts and store.ts ported;
     src/upstream.ts copied; test/gateway.test.ts ported; scripts/agent.ts ported from
-    scripts/demo/cases.ts and apps/gateway/test/e2e.test.ts
+    scripts/demo/cases.ts and apps/gateway/test/e2e.test.ts; the session store in
+    src/sessions.ts modelled on store.ts
   - apps/dashboard: src/App.tsx, api.ts, format.ts, vite.config.ts and index.html ported;
     src/main.tsx, styles.css and tsconfig.json copied unchanged (apart from a header comment)
   - scripts/gateway-cases.sh: ported from scripts/e2e-gateway.sh
@@ -62,6 +63,8 @@ WebProof (github.com/bilgin-kocak/webproof-solana) @ 609a654, Apache License 2.0
 Designs followed, with no code copied:
   - packages/sdk/src/hold.ts: the sponsored ("pull") flow of Stellar's MPP Charge,
     github.com/stellar/stellar-mpp-sdk @ 90394ec (MIT, as its package.json declares)
+  - packages/sdk/src/mpp/session.ts: the credential shape (an `action` per credential) of the
+    `channel` intent of Stellar's MPP SDK, github.com/stellar/stellar-mpp-sdk @ 90394ec
   - packages/sdk/src/x402: the escrow flow of x402's auth-capture draft and the `exact` scheme on
     Stellar, github.com/x402-foundation/x402 @ e95b066, specs/ (Apache License 2.0)
   - packages/sdk/src/channels.ts: the HTTP API of OpenZeppelin's Channels plugin,

@@ -6,12 +6,12 @@ Adapted from Fermata's `SECURITY.md` (bilgin-kocak/fermata @ d7cc642) for the St
 
 ## Scope
 
-- **Testnet only.** The escrow is built for, and demonstrated on, Stellar testnet and local
-  quickstart networks. There is no mainnet deployment; a security audit comes before one
+- **Testnet only.** The escrow and the session contract are built for, and demonstrated on,
+  Stellar testnet and local quickstart networks. There is no mainnet deployment; a security audit comes before one
   ([`ROADMAP.md`](../ROADMAP.md), M3).
-- **Trust model.** The escrow trusts one Ed25519 verifier key per service. The attestor holds it
-  and signs only after a TLSNotary presentation passes its checks; in these milestones the same
-  operator runs the notary. See [`trust-model.md`](trust-model.md).
+- **Trust model.** The escrow and the session contract trust one Ed25519 verifier key per
+  service. The attestor holds it and signs only after a TLSNotary presentation passes its checks;
+  in these milestones the same operator runs the notary. See [`trust-model.md`](trust-model.md).
 - **Dependencies.** Pinned:
   - **Contract and verdict crate.** `soroban-sdk` 29.0.1 (exact versions in `Cargo.lock`) and
     Rust 1.97.0 (`rust-toolchain.toml`).
@@ -32,6 +32,9 @@ Adapted from Fermata's `SECURITY.md` (bilgin-kocak/fermata @ d7cc642) for the St
   environment variable if set. It reaches `fermata-verdict` and `fermata-attest` only through
   their environment, never as a command-line flag. The attestor holds no Stellar account: it reads
   the escrow by simulation.
+- **The agent's ticket key** (sessions) is an Ed25519 key apart from its account, used only to
+  sign tickets. `scripts/session-cases.sh` keeps it in the keystore as `fermata-ticket`; the SDK's
+  client makes a new one for each session and keeps it in memory.
 - **The notary key** (secp256k1) is read from `NOTARY_PRIVATE_KEY`. `scripts/attest-cases.sh` and
   `scripts/gateway-cases.sh` generate one for each run and keep it in memory; services pin only its
   hash.
@@ -45,10 +48,10 @@ Adapted from Fermata's `SECURITY.md` (bilgin-kocak/fermata @ d7cc642) for the St
   `scripts/gateway-cases.sh` passes the relayer's and the agent's keys from the keystore into
   those two processes' environments for the run, and generates the HMAC key for each run. It also
   checks that the vendor's `Authorization` value never appears in a presentation.
-- **Keep the verifier key for verdicts only.** Never use it as an account signer. Verdict messages
-  are 294 bytes and start with a fixed tag, while Stellar transaction and authorization
-  signatures cover 32-byte hashes, so the two cannot be confused. A dedicated key keeps it that
-  way.
+- **Keep the verifier key for verdicts and statements only.** Never use it as an account signer.
+  Verdict messages are 294 bytes and batch statements 288, each starting with its own fixed tag,
+  while Stellar transaction and authorization signatures cover 32-byte hashes, so none can be
+  confused with another. A dedicated key keeps it that way.
 - **Files.** `.env`, `.stellar/`, `*.secret`, certificates and keys (`certs/`, `*.pem`, `*.key`)
   and stored presentations are git-ignored. The demo vendor's dev CA is generated on each machine.
   If you find a real secret committed here, treat it as compromised and report it.
@@ -90,6 +93,20 @@ Adapted from Fermata's `SECURITY.md` (bilgin-kocak/fermata @ d7cc642) for the St
 - **Reconciliation.** It flags a wrong amount, a second settlement, a hold missing from the index
   and a balance that does not match the open holds. On a local network, every call in the M2
   cases, and the escrow as a whole, reconcile from the indexed events.
+- **Sessions.**
+  - Only the agent can open a session from its balance, for exactly calls × price.
+  - A batch settles only with the agent's ticket over its requests and the verifier's statement
+    over its results, for this network and contract. A replayed batch, another key's ticket or
+    statement, a request the agent did not sign, and entries changed after signing are refused.
+  - The contract's balance equals what is left of the open sessions' deposits, each call settles
+    at most once, and money is conserved (random sequences across services, tokens and agents).
+  - After the deadline anyone can close a session, and what was not settled goes to the agent; an
+    archived session can still be closed and still blocks its id.
+  - The attestor checks the agent's ticket before the vendor is contacted, takes the calls of a
+    session in order and once each, records a call with no proof as UNANSWERED (also across a
+    restart), and signs statements only over calls it recorded.
+  - The gateway refuses a call out of order, a ticket over another request and a replayed
+    credential, and its sweeper settles and closes sessions.
 
 The suite was mutation-checked by hand during development: five injected bugs were each caught.
 They were fee rounding up, the window off by one, the fee read at settlement instead of at hold,
@@ -105,7 +122,8 @@ They were fee rounding up, the window off by one, the fee read at settlement ins
   produce a presentation for bytes the vendor never sent. An independent notary is the planned fix.
 - **The attestor's HTTP API has no authentication.** It is meant for a gateway on the same host,
   and listens on 127.0.0.1 by default. Anyone who can reach it can ask it to prove calls, and can
-  download stored presentations.
+  download stored presentations. A session call, proved or recorded UNANSWERED, also needs the
+  agent's ticket for it.
 - **Recipients that cannot receive.**
   - A DELIVERED settlement fails as a whole if the vendor's payout or the treasury cannot receive
     the token (no trustline, deauthorized by the issuer, frozen). The hold stays open and the
@@ -115,9 +133,9 @@ They were fee rounding up, the window off by one, the fee read at settlement ins
   that lies about balances) can only affect holds on services that chose it; holds on other tokens
   are isolated. Agents should pay only into services whose token they accept; the TypeScript
   SDK's `isTrustedService` checks the verifier and, optionally, the token.
-- **Error codes.** Contract errors use codes 101–117, so they cannot be confused with the Stellar
-  Asset Contract's own codes (1–15). The SAC propagates those unchanged when a transfer inside
-  `hold`, `settle` or `claim_timeout` fails.
+- **Error codes.** Contract errors use codes 101–117 (the escrow) and 201–211 (the session
+  contract), so they cannot be confused with the Stellar Asset Contract's own codes (1–15). The
+  SAC propagates those unchanged when a transfer inside a contract call fails.
 - **A failed signature check is a host error, not a contract error.** `ed25519_verify` traps, and
   callers see a generic host error. The cause, `Error(Crypto, InvalidInput)`, appears in the
   transaction's diagnostic events.
@@ -128,15 +146,30 @@ They were fee rounding up, the window off by one, the fee read at settlement ins
     retention loses those events. The indexer records the gap, and the escrow-wide balance check
     is then skipped.
 - **The gateway's read API has no authentication.** It listens on 127.0.0.1 by default. Anyone who
-  can reach it can list every call, download every presentation, and so read every vendor
-  response.
+  can reach it can list every call and session, download every presentation, and so read every
+  vendor response.
 - **MPP replay protection is in memory** (mppx's store) and is forgotten when the gateway
   restarts. A credential replayed after a restart can still never make an agent pay twice:
   - the gateway checks that the hold is still open;
-  - the escrow refuses a second hold for the same call id.
-- **Sponsored holds cost the gateway fees.** Each one is a transaction it pays for (or OpenZeppelin
-  Channels does). A payer must lock real money in each hold, which bounds the cost. Still, the
-  only limit is admission control: no rate limit per agent.
+  - the escrow refuses a second hold for the same call id;
+  - for sessions, the gateway's record takes each call number once, and the contract refuses a
+    second opening of a session id.
+- **Sponsored holds and session openings cost the gateway fees.** Each one is a transaction it pays
+  for (or OpenZeppelin Channels does). A payer must lock real money in each, which bounds the
+  cost. Still, the only limit is admission control: no rate limit per agent.
+- **Sessions.**
+  - **The deposit is locked** until the session's last call is settled or its deadline has
+    passed, even if the gateway disappears; then anyone can close the session and the rest
+    returns to the agent.
+  - **No batch, no payment.** Calls not settled by the deadline are refunded at the close,
+    delivered or not, as a hold with no verdict times out. The vendor relies on the gateway, or on
+    the attestor's statements, to settle in time.
+  - **One call at a time.** The gateway takes the calls of a session one after another; parallel
+    calls need parallel sessions.
+  - **The SDK's client keeps its sessions in memory.** An agent that restarts cannot continue a
+    session; its rest returns after the deadline.
+  - **Not covered.** x402 has no session flow, the gateway does not accept openings the agent
+    submits itself, and sampling (k > 1) is not built.
 - **Unprotected options.** Stellar's MPP Charge and x402 `exact` pay the vendor directly. Nothing
   is held or proved, and nothing is refunded. With `exact` through a hosted facilitator, that
   facilitator settles the payment. Neither hosted OpenZeppelin service has been tried from this
@@ -148,14 +181,15 @@ They were fee rounding up, the window off by one, the fee read at settlement ins
     for the run) is for local networks only.
   - A local network started with testnet's passphrase accepts signatures made for testnet. Use
     keys made for it (`KEY_PREFIX`), never testnet keys that hold anything.
-- **State archival.** Holds, services and the contract instance are extended as described in
-  [`architecture.md`](architecture.md). An archived entry is restored when touched (protocol 23
+- **State archival.** Holds, sessions, services and the contract instances are extended as
+  described in [`architecture.md`](architecture.md). An archived entry is restored when touched (protocol 23
   and later), which costs rent but never loses funds.
 - **Proofs and privacy.** A TLSNotary presentation reveals the vendor's whole response, and the
   attestor serves stored presentations to anyone who can reach it; see the trust model.
 - **MPC sessions sometimes stall** during setup, before the vendor is contacted. Fermata
   measured about 1 in 20 sessions; here 3 of 10 sessions in two test runs needed a second attempt.
-  The attestor retries, each retry costs a few seconds, and the hold's window bounds the delay.
+  The attestor retries, each retry costs a few seconds, and the hold's window bounds the delay. In
+  CI run 20 two attempts in a row stalled before the third proved the call.
 - **Testnet resets.** Stellar testnet is reset about once a quarter. A deployment and its links
   disappear and must be redeployed with `scripts/deploy-testnet.sh`.
 

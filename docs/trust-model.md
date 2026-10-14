@@ -25,20 +25,22 @@ also runs the notary, so the evidence is only as independent as that operator (s
 notary"). The trust-minimization items at the end are about prevention.
 
 Since Milestone 2, agents pay through a gateway. It submits holds and settlements, but it cannot
-move held money or change what an agent authorized (see "The gateway").
+move held money or change what an agent authorized (see "The gateway"). An agent can also pay for
+many calls with one deposit in the session contract. Every call is still proved, and the verifier
+signs each batch of results (see "Sessions").
 
 ## Parties
 
 | Party | Role | Holds a key? |
 |---|---|---|
-| Agent | Pays for one API call by authorizing `hold` (and the token transfer inside it) | Stellar account |
+| Agent | Pays for one API call by authorizing `hold` (and the token transfer inside it), or for a session of calls by authorizing `open_session` and signing a ticket for each call | Stellar account; for sessions, a ticket key |
 | Vendor | Registers a service (owner), receives `price − fee` on DELIVERED | Stellar account |
-| Verifier | Signs DELIVERED or FAILED verdicts for the services that pin its public key | Ed25519 key, used for verdicts only |
-| Relayer | Submits `settle` or `claim_timeout`; can be anyone, gains nothing. The gateway's relayer also submits sponsored holds and pays their fees | Any Stellar account |
-| Escrow owner | Changes the fee (at most 5 %) and the treasury | Stellar account |
-| Attestor (`fermata-attest`) | Proves the vendor's HTTPS response with TLSNotary, checks it against the escrow, signs the verdict | The verifier key; no Stellar account (it reads the escrow by simulation) |
+| Verifier | Signs DELIVERED or FAILED verdicts, and the batch statements of sessions, for the services that pin its public key | Ed25519 key, used for verdicts and statements only |
+| Relayer | Submits `settle`, `claim_timeout`, `settle_batch` or `close_session`; can be anyone, gains nothing. The gateway's relayer also submits sponsored holds and session openings and pays their fees | Any Stellar account |
+| Escrow owner | Changes the fee (at most 5 %) and the treasury, for the escrow and the session contracts that read it | Stellar account |
+| Attestor (`fermata-attest`) | Proves the vendor's HTTPS response with TLSNotary, checks it against the escrow (or the session and the agent's ticket), signs the verdict (or records the call's result and signs batch statements) | The verifier key; no Stellar account (it reads the contracts by simulation) |
 | Notary | Takes part in MPC-TLS without seeing plaintext and signs an attestation of the commitments | A secp256k1 key, pinned per service by its hash |
-| Gateway | Sells calls to agents over MPP and x402, submits holds and settlements, sweeps timed-out holds, indexes events | The relayer account and an HMAC key for its challenges |
+| Gateway | Sells calls to agents over MPP and x402, submits holds and settlements, sweeps timed-out holds, settles and closes sessions, indexes events | The relayer account and an HMAC key for its challenges |
 | OpenZeppelin Channels (optional) | Submits sponsored holds from its own accounts and pays their fees | Its own accounts and API keys |
 | x402 facilitator for `exact` (optional) | Settles the unprotected x402 option, a direct payment to the vendor | Its own account |
 
@@ -131,6 +133,51 @@ runs the attestor and the notary.
 - **The unprotected options** (Stellar's MPP Charge and x402 `exact`) are direct payments to the
   vendor's account. They carry none of these guarantees: no escrow, no proof, no refund. With x402
   `exact`, the agent also trusts the facilitator that settles it, as in any x402 payment.
+
+## Sessions (Milestone 2, phase 1)
+
+A session changes what the agent authorizes, not who decides. Every call is still proved, and the
+service's verifier still decides each call's result. The design and its exact rules are in
+[`session-escrow.md`](session-escrow.md).
+
+- **What the agent authorizes.** One `open_session` for the session contract, the service, the
+  number of calls and a deposit of calls × price, with the session's terms (k, B, expiry; the
+  gateway accepts only k = 1) and a ticket key. Each call is then authorized by a ticket: an
+  Ed25519 signature with the ticket key over `chain(n)`, which commits to the request hashes of
+  calls 1 to n, in order. The ticket key is not an account key and signs nothing but tickets. The
+  SDK's client makes a new one for each session.
+- **What the contract enforces.**
+  - A batch settles only calls the agent's ticket covers. The contract recomputes `chain(to)` from
+    the batch's request hashes and checks the ticket over it.
+  - A batch settles only with a statement signed by the service's verifier, over this network,
+    this contract, the session, the service, the predicate, the range of calls, `chain(to)` and
+    every call's result.
+  - Batches settle in order, and each call at most once.
+  - Money leaves only to the payout and the treasury, for DELIVERED calls, and to the agent.
+  - After the deadline, anyone can close the session, and what was not settled goes to the agent.
+  - The service's terms are copied from the escrow at opening, and the fee is snapshotted, so a
+    later fee change does not apply to the session.
+  - Tested by the invariant suite: the contract's balance equals what is left of the open
+    sessions' deposits, conservation, no double settlement.
+- **What changes for the agent.**
+  - The whole deposit stays locked until the session's last call is settled or its deadline
+    (expiry plus the settlement window) has passed. With holds, each call's price is locked only
+    until its own verdict or timeout.
+  - A ticket for call n covers calls 1 to n. Whoever holds it can settle those calls, but only
+    with the verifier's statement, and only to the same parties.
+- **What the verifier decides.** As with holds, a call's result: DELIVERED pays the vendor;
+  FAILED and UNANSWERED refund the agent. UNANSWERED needs no presentation: it is the result of a
+  call that got no proof, which a hold would refund by timeout.
+- **What the gateway can do.**
+  - **Submit the opening, or not.** It accepts only sponsored openings and cannot change them.
+  - **Stop settling.** Then the vendor is not paid for the calls left, and after the deadline
+    anyone can close the session and return them to the agent. `settle_batch` is open to anyone,
+    but the vendor needs the attestor's statement to submit it.
+  - **What it cannot do:** settle a call without the agent's ticket and the verifier's statement,
+    or move the deposit anywhere else.
+- **Not covered.** x402 has no session flow. Sampling (k > 1) changes the guarantee, and that
+  decision is open until phase 2. The contract accepts sampled sessions, but the SDK's client
+  opens, and the gateway and the attestor take, only sessions with k = 1.
 
 ## What the proof does and does not establish
 

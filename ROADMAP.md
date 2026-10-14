@@ -1,8 +1,9 @@
 # Roadmap
 
-The milestones follow the Stellar Community Fund's tranche structure. Milestones 0 and 1, and the
-gateway half of Milestone 2, are this repository today; their testnet runs are pending. Everything
-else is planned and not built yet. Each milestone ends with something a reviewer can run.
+The milestones follow the Stellar Community Fund's tranche structure. Milestones 0 and 1, the
+gateway of Milestone 2 and phase 1 of its session escrow are this repository today; their testnet
+runs are pending. Everything else is planned and not built yet. Each milestone ends with something
+a reviewer can run.
 
 ## M0 — The escrow on Stellar (done)
 
@@ -50,7 +51,7 @@ In M0 the verifier key signs verdicts directly; no TLSNotary proof is involved y
 Done when the three cases pass on testnet with real presentations and their offline
 re-verification matches the chain. Everything but the testnet run is in place.
 
-## M2 — Testnet product: the gateway on Stellar (the gateway done, except the testnet run)
+## M2 — Testnet product on Stellar (the gateway and session phase 1 done, testnet run pending)
 
 - **Done: a `fermata` MPP method** next to Stellar's MPP Charge, so an agent's paid request is held
   in escrow and settled on proof (`packages/sdk/src/mpp`, `apps/gateway`).
@@ -74,12 +75,24 @@ re-verification matches the chain. Everything but the testnet run is in place.
   (the three outcomes each, plus Stellar's MPP Charge and x402 `exact`) and reconciles every
   outcome. It passes on a local network and in CI. **The testnet run is pending:** the build
   environment cannot reach testnet, and the README has the commands.
-- **Next: lower proving cost.** Session escrow (hold once for N calls, settle in batches) and
-  sampled proving (prove a random subset the vendor cannot predict). Both need a new contract and
-  change the guarantee. The owner approved the design on 2026-10-14
-  ([`docs/session-escrow.md`](docs/session-escrow.md)). Phase 1, sessions in which every call is
-  proved, is in progress; sampling comes after a measurement of whether a vendor can tell proved
-  calls apart.
+- **Done: session escrow, phase 1** (every call proved, k = 1). The owner approved the design on
+  2026-10-14 ([`docs/session-escrow.md`](docs/session-escrow.md)).
+  - **The session contract** (`contracts/session`): one deposit for up to N calls of a service,
+    settled in batches the verifier signs, next to the escrow, whose registry, fee and treasury it
+    reads.
+  - **The attestor** proves each session call against the agent's ticket and signs the batch
+    statements.
+  - **The gateway** sells sessions through the `session` intent of the `fermata` MPP method,
+    settles them in batches and closes them after their deadline.
+  - **Reconciliation** covers sessions, one by one and the contract as a whole.
+  - **The cases.** `scripts/session-cases.sh` (script-signed statements) and a session through the
+    gateway in `scripts/gateway-cases.sh` pass on a local network and in CI. **The testnet run is
+    pending**, as above.
+- **Next: sampled proving, phase 2** (prove a random subset the vendor cannot predict, k > 1). The
+  contract already settles sampled batches. What remains is the attestor's unproved path with
+  padding, then a measurement of whether a vendor can tell proved calls apart, then the gateway's
+  sampling, switched on only if the measurement supports it. The guarantee for k > 1 (decision 1
+  of the design) is open until then. x402 sessions are not planned yet.
 
 Done when an agent pays a vendor through the gateway on testnet with both methods, and every
 outcome reconciles from events. For that, everything but the testnet run is in place.

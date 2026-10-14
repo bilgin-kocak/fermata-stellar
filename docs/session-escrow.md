@@ -1,11 +1,14 @@
 # Session escrow and sampled proving: the design
 
 **Status: approved by the repository owner on 2026-10-14, with the recommended options (decisions
-2 to 4 at the end); decision 1 stays open until phase 2. Phase 1 (every call proved, k = 1) is in
-progress; sampling (k > 1) is not built and will not be switched on before the measurement in
-section 6.** This was decision 4 of [`PORTING_NOTES.md`](PORTING_NOTES.md#decisions): the gateway,
-both payment methods and reconciliation came first, and this design went to the owner before any
-code. Written 2026-10-14; section 10 specifies phase 1.
+2 to 4 at the end); decision 1 stays open until phase 2. Phase 1 (every call proved, k = 1) is
+built: the session contract, the attestor's session calls and statements, the MPP `session`
+intent and the gateway's batches. It is tested on a local network and in CI; the testnet run is
+pending, as for the milestones before it. Sampling (k > 1) is not built and will not be switched
+on before the measurement in section 6.** This was decision 4 of
+[`PORTING_NOTES.md`](PORTING_NOTES.md#decisions): the gateway, both payment methods and
+reconciliation came first, and this design went to the owner before any code. Written
+2026-10-14; section 10 specifies phase 1.
 
 Neither part exists in Fermata on Tempo either. Fermata's README lists both under "The production
 shape, none of it built yet", and notes that sampling changes the guarantee.
@@ -297,6 +300,58 @@ to 15). A signature that does not verify is a host crypto error, as in the escro
   entries hash) and `SessionClosed` (the refund). Money moves are the token's own `transfer`
   events, as in the escrow.
 
+**The attestor** (`apps/attestor/src/session.rs`). Sessions are on when it is started with
+`--session-contract`, which must read the attestor's escrow.
+
+- **Before proving call n** (`POST /v1/session/attest`), it reads the session (a simulated
+  `get_session`) and checks the following:
+  - the session is open, this attestor's key is its verifier, and k = 1;
+  - its calls have not expired;
+  - n is the next call;
+  - the agent's ticket for call n verifies over `chain(n)` with this request's hash.
+
+  A call that fails these checks never reaches the vendor.
+- **After proving,** the hold's binding checks apply, with the session in place of the hold and
+  `call_id(n)` as the `X-Fermata-Call` header. The call's entry is DELIVERED or FAILED, with the
+  presentation's and the response's hashes.
+- **No proof, no payment.** A call whose proving fails, or whose proof does not bind, is recorded
+  UNANSWERED, as a hold with no verdict is refunded. `POST /v1/session/unanswered` records a call
+  UNANSWERED without proving it, after the same ticket check; the gateway uses it for calls the
+  attestor could not take.
+- **The book.** Each session has a book (JSON lines under `--sessions`) of the calls the attestor
+  admitted. A call still being proved when the attestor stopped is recorded UNANSWERED when it
+  starts again. `GET /v1/session/<id>` lists the book.
+- **Statements.** `POST /v1/session/statement` with `{sessionId, to}` signs the statement for
+  calls `settled + 1` through `to`. It signs only before the deadline, only over recorded calls
+  whose chain extends the contract's `chain(settled)`, and never over more than B calls.
+
+**MPP and the gateway** (`packages/sdk/src/mpp/session.ts`, `apps/gateway`). The `fermata`
+method has a `session` intent next to `charge`.
+
+- **The challenge** names the session contract, the service, the request's hash, the price, and
+  the gateway's B, most calls per session and longest session. When the agent names its session
+  in the `X-Fermata-Session` header, the challenge also carries the call the gateway takes next
+  and the chain before it.
+- **Opening.** The first paid call opens the session. The agent signs only the authorization of
+  `open_session` (k = 1, the gateway's B, a zero seed, a deposit of calls × price) and its ticket
+  for call 1. The gateway checks the authorization as it checks a sponsored hold, records the
+  session, then submits the opening and pays its fee. It accepts only sponsored openings.
+- **Calls.** Each later call's credential is the next ticket; there is no transaction per call.
+  The gateway takes one call of a session at a time, has the attestor prove it, and returns the
+  vendor's response with a receipt naming the session, n, `chain(n)` and the outcome.
+- **Settling.** The gateway settles a batch when B calls are recorded, when the session has
+  expired, or when it is full. After the deadline it closes the session, so what is left returns
+  to the agent. Its sweeper retries all of this.
+- **Reconciliation.** The gateway's indexer keeps the session contract's events with the token's
+  transfers.
+  - Each session reconciles: the deposit in, each batch's payout, fee and refund, and the close.
+  - So does the contract as a whole: per token, its balance equals what is left of the open
+    sessions' deposits. Sessions of services the gateway does not serve count in the token their
+    deposit came in; one in a token the gateway's index does not follow is listed as untracked.
+  - The read API serves them at `/sessions`, `/sessions/<id>`, `/sessions/<id>/reconcile` and
+    `/reconcile/sessions`.
+- **x402** has no session flow.
+
 **Cost, measured.** `settle_batch` with every call proved, on the built wasm of both contracts, in
 the host's cost model (soroban-env-host 29.0.1; `contracts/session/src/tests/cost.rs`, run in CI
 after the builds):
@@ -310,6 +365,10 @@ after the builds):
 The per-transaction limits of the local network the CI runs on (quickstart, protocol 29) are 400 M
 instructions, 40 MiB of memory and 132,096 bytes. At B = 1,000 the transaction's size is the
 closest limit, not CPU. Testnet's limits were not checked from this environment.
+
+`scripts/session-cases.sh` also simulates a batch on the network, and CI runs it with 1,000 calls
+on every push. In CI run 21, on the local network, that batch took 45,343,218 instructions, a
+resource fee of 547,951 stroops and 101,048 bytes before signing.
 
 ## Decisions taken
 
