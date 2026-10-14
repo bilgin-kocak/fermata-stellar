@@ -6,7 +6,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
-import { EscrowIndexer, aggregateScores, reconcileEscrow, tokenBalance } from '../src/index.ts'
+import { EscrowIndexer, aggregateScores, reconcileCall, reconcileEscrow, tokenBalance } from '../src/index.ts'
 
 const file = process.env.FERMATA_DEPLOYMENT
 const root = new URL('../../../', import.meta.url)
@@ -40,11 +40,15 @@ describe.skipIf(!file)('the indexer on a deployed escrow (FERMATA_DEPLOYMENT)', 
     await ix.poll()
     const onchain = { [d.token.sac]: await tokenBalance(rpcUrl, d.network_passphrase, d.token.sac, escrow) }
     const r = reconcileEscrow(ix.events, escrow, onchain)
-    expect(r.calls.failing).toEqual([])
+    // On failure, say which checks failed and on what (one intermittent failure, not reproduced).
+    const why = (ids: readonly string[]) =>
+      JSON.stringify(ids.map((id) => ({ id, failed: reconcileCall(ix.events, id, escrow).checks.filter((c) => !c.ok) })))
+    expect(r.calls.failing, why(r.calls.failing)).toEqual([])
     expect(r.calls.held).toBeGreaterThan(0)
     if (ix.gaps.length === 0 && ix.events.some((e) => e.name === 'treasury_updated')) {
       // The index starts at the deployment: the balance check applies.
-      expect(r.tokens.find((t) => t.token === d.token.sac)).toMatchObject({ ok: true })
+      const token = r.tokens.find((t) => t.token === d.token.sac)
+      expect(token, JSON.stringify({ token, latestLedger: ix.latestLedger }, (_, v) => (typeof v === 'bigint' ? v.toString() : v))).toMatchObject({ ok: true })
     }
     const scores = aggregateScores(ix.events)
     expect(scores.find((s) => s.serviceId === d.service.id)?.held).toBeGreaterThan(0)
