@@ -215,7 +215,8 @@ TLSNotary offers it.
 - the default per-transaction budget is 100 M.
 
 The per-call work in a batch is a few hashes and its share of the signed statement. The batch size
-would be set from measured CPU, memory and transaction size against testnet's limits.
+would be set from measured CPU, memory and transaction size against testnet's limits; phase 1's
+measurements are in section 10.
 
 ## 9. Plan, if approved
 
@@ -277,6 +278,38 @@ ticket key or (with k > 1) seed is refused, and so is a service whose payout is 
 
 **Errors** start at 201, apart from the escrow's (101 to 117) and the Stellar Asset Contract's (1
 to 15). A signature that does not verify is a host crypto error, as in the escrow.
+
+**Entry points** (`contracts/session`):
+
+- `open_session(agent, session_id, service_id, max_calls, ticket_key, sample_k, batch_size, seed,
+  expires_at)`. The agent authorizes it, including the deposit's transfer. The deadline is
+  `expires_at` plus the service's settlement window.
+- `settle_batch(session_id, to, request_hashes, ticket, seed, entries, statement)`. Callable by
+  anyone until the deadline. `request_hashes` and `entries` are the batch's request hashes and
+  entries concatenated in call order (32 and 68 bytes per call), so the contract hashes the
+  entries once and reads each call's part at its offset. `ticket` is the agent's signature over
+  `ticket(to)`.
+- `close_session(session_id)`. Callable by anyone after the deadline; returns
+  `(max_calls − settled) × price` to the agent.
+- Views: `get_session`, `escrow`, and `ticket_message`, `statement_message`, `call_id` and
+  `sampled`, which return the exact bytes and values above for this contract on this network.
+- Events: `SessionOpened`, `BatchSettled` (the counts per result, the amounts, `chain(to)` and the
+  entries hash) and `SessionClosed` (the refund). Money moves are the token's own `transfer`
+  events, as in the escrow.
+
+**Cost, measured.** `settle_batch` with every call proved, on the built wasm of both contracts, in
+the host's cost model (soroban-env-host 29.0.1; `contracts/session/src/tests/cost.rs`, run in CI
+after the builds):
+
+| Calls in the batch | CPU instructions | Memory | Request hashes and entries |
+|---|---|---|---|
+| 1 | 2.6 M | 2.5 MB | 100 bytes |
+| 100 | 6.3 M | 2.6 MB | 10,000 bytes |
+| 1,000 | 40.0 M | 3.2 MB | 100,000 bytes |
+
+The per-transaction limits of the local network the CI runs on (quickstart, protocol 29) are 400 M
+instructions, 40 MiB of memory and 132,096 bytes. At B = 1,000 the transaction's size is the
+closest limit, not CPU. Testnet's limits were not checked from this environment.
 
 ## Decisions taken
 
