@@ -232,7 +232,6 @@ export function reconcileSession(
   const closed = closings[0]
   const checks: Check[] = []
   const check = (name: string, ok: boolean, detail?: string) => checks.push({ name, ok, ...(detail && !ok ? { detail } : {}) })
-  const token = opened ? opts.tokenOf?.(opened.serviceId) : undefined
   const payout = opened ? opts.payoutOf?.(opened.serviceId) : undefined
   const txs = new Set([opened?.txHash, ...batches.map((b) => b.txHash), closed?.txHash].filter((h): h is string => !!h))
   const movements = events
@@ -240,10 +239,13 @@ export function reconcileSession(
     .filter((t) => txs.has(t.txHash))
     .map((t) => ({ txHash: t.txHash, token: t.token, from: t.from, to: t.to, amount: t.amount }))
   const out = (txHash: Hex) => movements.filter((m) => m.txHash === txHash && m.from === contract)
+  const into = opened ? movements.filter((m) => m.txHash === opened.txHash && m.to === contract) : []
+  // The session contract's events do not name the token. For a service the caller does not know
+  // (another gateway's, on the same contract), the deposit's own transfer does.
+  const token = (opened ? opts.tokenOf?.(opened.serviceId) : undefined) ?? (into.length === 1 ? into[0]!.token : undefined)
 
   check('opened once', openings.length === 1, openings.length === 0 ? 'no session_opened event in the index' : `${openings.length} openings`)
   if (opened) {
-    const into = movements.filter((m) => m.txHash === opened.txHash && m.to === contract)
     const one = into.length === 1 ? into[0]! : undefined
     check(
       'the opening moved the deposit from the agent into the session contract',
@@ -333,7 +335,12 @@ export function reconcileSession(
 
 export type SessionsReconciliation = {
   tokens: { token: string; into: bigint; out: bigint; balance: bigint; openDeposits: bigint; onchain?: bigint; ok: boolean }[]
-  sessions: { opened: number; open: number; closed: number; failing: Hex[] }
+  /**
+   * `untracked`: sessions of services the caller does not know whose deposit is not in the index
+   * either, so in a token the index does not follow; they cannot be checked, and do not change the
+   * balances of the tokens it follows.
+   */
+  sessions: { opened: number; open: number; closed: number; failing: Hex[]; untracked: Hex[] }
   ok: boolean
 }
 
@@ -367,10 +374,11 @@ export function reconcileSessions(
     r.ok = r.balance === r.openDeposits && (r.onchain === undefined || r.onchain === r.balance)
   }
   const tokens = [...rows.values()]
-  const failing = all.filter((s) => !s.ok).map((s) => s.sessionId)
+  const untracked = all.filter((s) => s.token === undefined).map((s) => s.sessionId)
+  const failing = all.filter((s) => !s.ok && s.token !== undefined).map((s) => s.sessionId)
   return {
     tokens,
-    sessions: { opened: all.length, open: all.filter((s) => s.status === 'open').length, closed: all.filter((s) => s.status === 'closed').length, failing },
+    sessions: { opened: all.length, open: all.filter((s) => s.status === 'open').length, closed: all.filter((s) => s.status === 'closed').length, failing, untracked },
     ok: failing.length === 0 && tokens.every((t) => t.ok),
   }
 }

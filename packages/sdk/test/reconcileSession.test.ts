@@ -114,4 +114,31 @@ describe('reconcileSessions', () => {
     expect(r.ok).toBe(true)
     expect(reconcileSessions(events, contract, { [token]: 1n }, opts).ok).toBe(false)
   })
+
+  it('counts a session of a service the caller does not know in the token its deposit came in', () => {
+    const [a, b] = [h('u1'), h('u2')]
+    const other = h('a service of another gateway')
+    const elsewhere = open(b, 4).map((e) => ('serviceId' in e ? { ...e, serviceId: other } : e))
+    const events = [...open(a, 10), ...batch(a, 0, 4, 4), ...elsewhere]
+    const known = { ...opts, tokenOf: (id: string) => (id === A ? token : undefined), payoutOf: (id: string) => (id === A ? payout : undefined) }
+    const r = reconcileSessions(events, contract, { [token]: 10n * PRICE }, known)
+    expect(r.tokens).toEqual([expect.objectContaining({ token, balance: 10n * PRICE, openDeposits: 10n * PRICE, ok: true })])
+    expect(r.ok).toBe(true)
+  })
+
+  it('lists a session in a token the index does not follow as untracked, not failing', () => {
+    const [a, b] = [h('v1'), h('v2')]
+    const other = h('a service in another token')
+    const elsewhere = open(b, 4)
+      .filter((e) => e.name !== 'transfer')
+      .map((e) => ('serviceId' in e ? { ...e, serviceId: other } : e))
+    const events = [...open(a, 10), ...batch(a, 0, 4, 4), ...elsewhere]
+    const known = { ...opts, tokenOf: (id: string) => (id === A ? token : undefined) }
+    const r = reconcileSessions(events, contract, { [token]: 6n * PRICE }, known)
+    expect(r.sessions).toMatchObject({ opened: 2, open: 2, failing: [], untracked: [b] })
+    expect(r.ok).toBe(true)
+    // A session of a known service whose deposit is missing still fails.
+    const missing = open(b, 4).filter((e) => e.name !== 'transfer')
+    expect(reconcileSessions([...open(a, 10), ...missing], contract, {}, opts).sessions.failing).toEqual([b])
+  })
 })
