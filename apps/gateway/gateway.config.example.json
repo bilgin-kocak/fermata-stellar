@@ -1,0 +1,25 @@
+{
+  "port": 4300,
+  "realm": "localhost",
+  "network": "stellar:testnet",
+  "rpcUrl": "https://soroban-testnet.stellar.org",
+  "escrow": "C… (deployments/testnet.json, escrow.contract_id)",
+  "startLedger": 0,
+  "attestorUrl": "http://127.0.0.1:7048",
+  "storageDir": "storage/calls",
+  "indexDir": "storage/index",
+  "sweepIntervalMs": 10000,
+  "channels": { "baseUrl": "https://channels.openzeppelin.com/testnet" },
+  "exactFacilitatorUrl": "https://channels.openzeppelin.com/x402/testnet",
+  "services": [
+    {
+      "serviceId": "64 hex (deployments/testnet.json, service.id)",
+      "upstream": "https://vendor.fermata.test:8443",
+      "examplePath": "/v1/quote?symbol=BTC-USD",
+      "summary": "BTC/ETH/SOL spot quote",
+      "forwardHeaders": ["content-type", "accept"],
+      "upstreamAuth": { "header": "Authorization", "env": "VENDOR_UPSTREAM_TOKEN" },
+      "unprotected": { "recipient": "G… (the vendor's payout account, with a trustline to the token)" }
+    }
+  ]
+}

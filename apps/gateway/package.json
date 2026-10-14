@@ -1,0 +1,33 @@
+{
+  "name": "@fermata-stellar/gateway",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Fermata gateway on Stellar: a paid-API proxy that holds each call's price in the escrow, proves the vendor's response with TLSNotary and settles on the verdict.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "start": "tsx src/main.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@hono/node-server": "2.1.5",
+    "@stellar/mpp": "github:stellar/stellar-mpp-sdk#90394ecdb9ff4e7d48ece35db18fe114ffdc6681",
+    "@stellar/stellar-sdk": "^16.3.1",
+    "@x402/core": "2.28.0",
+    "@x402/stellar": "2.28.0",
+    "fermata-stellar-sdk": "workspace:*",
+    "hono": "4.13.13",
+    "mppx": "0.10.1",
+    "undici": "^7.30.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "tsx": "^4.23.15",
+    "typescript": "~5.9.3",
+    "vitest": "^5.0.4"
+  }
+}

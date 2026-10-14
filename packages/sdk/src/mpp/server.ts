@@ -56,6 +56,12 @@ export type FermataServerOptions = {
   lagToleranceMs?: number
   /** The longest an agent's signed authorization may stay valid, in seconds. Default 300. */
   maxAuthorizationSeconds?: number
+  /**
+   * Called just before a sponsored hold is submitted, so the caller can record the call first: if
+   * the submission's outcome is lost (a timeout) and the hold lands anyway, the record lets the
+   * caller find it and have it refunded after the window.
+   */
+  onSponsoredHold?: (call: { callId: string; agent: string; serviceId: string; requestHash: string }) => Promise<void> | void
 }
 
 /**
@@ -184,6 +190,7 @@ export function fermataServer(opts: FermataServerOptions): Method.Server<typeof 
       if (payload.type === 'transaction') {
         // Settlement checks again: it must not rely on validate having run.
         const hold = await checkTransaction(payload.transaction, terms, credential.challenge.expires)
+        await opts.onSponsoredHold?.({ callId: terms.callId, agent: hold.agent, serviceId: terms.serviceId, requestHash: terms.requestHash })
         const landed = await submitSponsoredHold({
           server,
           networkPassphrase: passphrase,
