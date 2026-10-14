@@ -55,7 +55,7 @@ jobs:
       - name: What settle_batch costs, measured on the session wasm
         run: cargo test -p fermata-session cost -- --ignored --nocapture
 
-      - name: The committed TypeScript client matches the contract
+      - name: The committed TypeScript clients match the contracts
         run: bash packages/sdk/scripts/bindings.sh --check
 
   attestor:
@@ -189,11 +189,13 @@ jobs:
           pnpm install --frozen-lockfile
 
       # The live suites: the escrow's views, holds through a relayer and through a stand-in Channels
-      # service, the MPP method and the x402 scheme end to end, and the indexer with reconciliation.
+      # service, the MPP method and the x402 scheme end to end, the indexer with reconciliation, and
+      # sessions opened (sponsored and not) and settled with batches the SDK signs.
       - name: The SDK's live tests against the deployment
         run: |
           FERMATA_AGENT_SECRET="$(stellar keys secret fermata-agent)" \
           FERMATA_RELAYER_SECRET="$(stellar keys secret fermata-relayer)" \
+          FERMATA_VERIFIER_SECRET="$(stellar keys secret fermata-verifier)" \
           FERMATA_DEPLOYMENT=deployments/local.json pnpm sdk:test
 
       - name: M2 cases (an agent pays through the gateway with MPP and x402; every outcome reconciled)
