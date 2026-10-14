@@ -445,6 +445,12 @@ Written at the end of the milestone.
 - **Tests ported from Fermata's `tests/attest.rs`.** `attestor_end_to_end`, `soak` and
   `real_vendor_npm`; the last two stay ignored. Fermata's two ABI unit tests (selector and word
   decoding) are replaced by five XDR tests.
+- **The first proof's time bound.** Fermata's `attestor_end_to_end` requires the first proof to
+  finish within 10 s. The test's own retry policy allows more: an attempt that stalls in MPC
+  setup is cut off after 5 s and retried, up to three attempts. In CI run 20 two attempts stalled
+  in a row, the third proved in under a second, and the whole took 10.9 s, so the test failed
+  although the prover behaved as designed. The bound is now 10 s plus 5 s per retried attempt. A
+  stall after setup still breaks it, because such an attempt runs to its full 15 s.
 
 ## 10. Milestone 2 plan: the gateway on Stellar
 

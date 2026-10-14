@@ -158,6 +158,10 @@ fn request(
 }
 
 async fn prove_ok(req: &ProveRequest) -> Vec<u8> {
+    prove_counted(req).await.presentation
+}
+
+async fn prove_counted(req: &ProveRequest) -> prove::ProveOutput {
     let out = prove::prove(req, 3, Duration::from_secs(15))
         .await
         .expect("prove");
@@ -169,7 +173,7 @@ async fn prove_ok(req: &ProveRequest) -> Vec<u8> {
         out.notary_bytes.sent > 100_000 && out.notary_bytes.received > 100_000,
         "MPC traffic not counted"
     );
-    out.presentation
+    out
 }
 
 /// A service the vendor registers under `label` for the vendor on `port`, as `get_service` would
@@ -291,20 +295,20 @@ async fn attestor_end_to_end() {
     let call_ok = [0xc1; 32];
     let call_500 = [0xc2; 32];
     let call_trunc = [0xc3; 32];
+    let req_ok = request(&notary_addr, ok_port, &roots, call_ok, default_redactions());
     let t0 = std::time::Instant::now();
-    let p_ok = prove_ok(&request(
-        &notary_addr,
-        ok_port,
-        &roots,
-        call_ok,
-        default_redactions(),
-    ))
-    .await;
+    let first = prove_counted(&req_ok).await;
     let ok_ms = t0.elapsed().as_millis();
+    // An attempt that stalls in MPC setup is cut off after the setup timeout and retried
+    // (prove.rs), so each retried attempt may add that much. Any other stall takes the attempt's
+    // full 15 s and breaks the bound.
+    let bound = 10_000 + u128::from(first.attempts - 1) * req_ok.setup_timeout.as_millis();
     assert!(
-        ok_ms < 10_000,
-        "first prove took {ok_ms} ms (stalled session?)"
+        ok_ms < bound,
+        "first prove took {ok_ms} ms in {} attempt(s), bound {bound} ms (stalled session?)",
+        first.attempts
     );
+    let p_ok = first.presentation;
     let p_500 = prove_ok(&request(
         &notary_addr,
         port_500,
