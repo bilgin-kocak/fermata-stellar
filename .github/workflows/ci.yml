@@ -111,7 +111,7 @@ jobs:
         run: pnpm dashboard:build
 
   e2e:
-    name: end to end on a local Stellar network (deploy, M0, M1 and M2 cases)
+    name: end to end on a local Stellar network (deploy, M0, session, M1 and M2 cases)
     runs-on: ubuntu-24.04
     env:
       NETWORK: local
@@ -150,9 +150,10 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Build the contract, fermata-verdict and the attestor
+      - name: Build the contracts, fermata-verdict and the attestor
         run: |
           stellar contract build --package fermata-escrow
+          stellar contract build --package fermata-session
           cargo build --locked --release -p fermata-verdict
           (cd apps/attestor && cargo build --locked --release)
 
@@ -169,11 +170,15 @@ jobs:
             sleep 2
           done
 
-      - name: Deploy the escrow and the demo service
+      - name: Deploy the escrow, the session contract and the demo service
         run: scripts/deploy-testnet.sh
 
       - name: M0 cases (verdicts signed by the script)
         run: scripts/demo-cases.sh
+
+      # The largest batch the contract takes, simulated on this network: its CPU, fee and size.
+      - name: Session cases (statements signed by the script)
+        run: COST_CALLS=1000 scripts/session-cases.sh
 
       - name: M1 cases (real TLSNotary proofs through the attestor)
         run: scripts/attest-cases.sh

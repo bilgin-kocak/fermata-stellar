@@ -1,7 +1,7 @@
 # shellcheck shell=bash
 # Variables set here are used by the scripts that source this file.
 # shellcheck disable=SC2034
-# Helpers shared by deploy-testnet.sh and demo-cases.sh. Sourced, not executed.
+# Helpers shared by the scripts in this directory. Sourced, not executed.
 #
 # Keys live only in the Stellar CLI keystore (`stellar keys`), as identities named
 # "$KEY_PREFIX-<role>". Secrets are never printed or written to the repository; the verifier's
@@ -23,6 +23,7 @@ DEPLOYMENT="${DEPLOYMENT:-$ROOT/deployments/$NETWORK.json}"
 OUT_DIR="${OUT_DIR:-$ROOT/out}"
 FV="$ROOT/target/release/fermata-verdict"
 WASM="$ROOT/target/wasm32v1-none/release/fermata_escrow.wasm"
+SESSION_WASM="$ROOT/target/wasm32v1-none/release/fermata_session.wasm"
 ATTEST="$ROOT/apps/attestor/target/release/fermata-attest"
 
 # NET: the network flags every `stellar` command gets. A local quickstart network is named by its
@@ -92,36 +93,62 @@ ensure_key() {
   fi
 }
 
+# A local quickstart's RPC sometimes fails a simulation with "could not query captive core" while
+# core publishes a checkpoint. Nothing was signed or sent then, so the command is safe to repeat.
+CAPTIVE_CORE_BUSY='could not query captive core'
+
 # submit CMD...: runs a Stellar CLI command that sends a transaction. Sets OUT (its stdout) and
 # LAST_TX (the hash of the last transaction it signed). On failure prints the CLI's output.
 OUT=""
 LAST_TX=""
 submit() {
-  local err
+  local err attempt
   err="$(mktemp)"
-  if ! OUT="$("$@" 2>"$err")"; then
-    cat "$err" >&2
-    rm -f "$err"
-    return 1
-  fi
-  LAST_TX="$(grep -o 'Signing transaction: [0-9a-f]\{64\}' "$err" | tail -1 | awk '{print $3}' || true)"
+  for attempt in 1 2 3; do
+    if OUT="$("$@" 2>"$err")"; then
+      LAST_TX="$(grep -o 'Signing transaction: [0-9a-f]\{64\}' "$err" | tail -1 | awk '{print $3}' || true)"
+      rm -f "$err"
+      return 0
+    fi
+    grep -q 'Signing transaction' "$err" && break
+    grep -q "$CAPTIVE_CORE_BUSY" "$err" || break
+    log "  the RPC could not query captive core (attempt $attempt); trying again"
+    sleep 2
+  done
+  cat "$err" >&2
   rm -f "$err"
+  return 1
 }
 
 # invoke ROLE FN ARGS...: sends a transaction calling the escrow, signed by ROLE.
 invoke() {
-  local role="$1"
-  shift
-  submit stellar contract invoke --id "$ESCROW" --source "$(key "$role")" \
+  invoke_at "$ESCROW" "$@"
+}
+
+# invoke_at CONTRACT ROLE FN ARGS...: sends a transaction calling CONTRACT, signed by ROLE.
+invoke_at() {
+  local contract="$1" role="$2"
+  shift 2
+  submit stellar contract invoke --id "$contract" --source "$(key "$role")" \
     "${NET[@]}" -- "$@"
 }
 
 # view CONTRACT FN ARGS...: simulates a read-only call and prints the JSON result.
 view() {
-  local contract="$1"
+  local contract="$1" err attempt
   shift
-  stellar contract invoke --id "$contract" --source "$(key relayer)" \
-    "${NET[@]}" --send=no -- "$@" 2>/dev/null
+  err="$(mktemp)"
+  for attempt in 1 2 3; do
+    if stellar contract invoke --id "$contract" --source "$(key relayer)" \
+      "${NET[@]}" --send=no -- "$@" 2>"$err"; then
+      rm -f "$err"
+      return 0
+    fi
+    grep -q "$CAPTIVE_CORE_BUSY" "$err" || break
+    sleep 2
+  done
+  rm -f "$err"
+  return 1
 }
 
 balance() { view "$TOKEN_SAC" balance --id "$1" | tr -d '"'; }
@@ -143,15 +170,28 @@ verifier_secret() {
   fi
 }
 
-build_tools() {
-  local out
-  log "building the contract and the fermata-verdict CLI"
-  if ! out="$(cd "$ROOT" && stellar contract build --package fermata-escrow 2>&1)"; then
-    printf '%s\n' "$out" >&2
-    die "contract build failed"
+# The agent's ticket key (signs session tickets, never a transaction), from FERMATA_TICKET_SECRET
+# if set, else from the keystore.
+ticket_secret() {
+  if [ -n "${FERMATA_TICKET_SECRET:-}" ]; then
+    printf '%s' "$FERMATA_TICKET_SECRET"
+  else
+    stellar keys secret "$(key ticket)"
   fi
+}
+
+build_tools() {
+  local out package
+  log "building the contracts and the fermata-verdict CLI"
+  for package in fermata-escrow fermata-session; do
+    if ! out="$(cd "$ROOT" && stellar contract build --package "$package" 2>&1)"; then
+      printf '%s\n' "$out" >&2
+      die "contract build failed ($package)"
+    fi
+  done
   (cd "$ROOT" && cargo build --quiet --release -p fermata-verdict)
   [ -f "$WASM" ] || die "no wasm at $WASM"
+  [ -f "$SESSION_WASM" ] || die "no wasm at $SESSION_WASM"
 }
 
 # The attestor is its own workspace; building from its directory picks up the Rust 1.95.0 its

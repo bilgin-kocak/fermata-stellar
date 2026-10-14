@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Deploys the Fermata escrow to Stellar testnet, registers a demo service and writes
-# deployments/<network>.json.
+# Deploys the Fermata escrow and the session contract (which reads the escrow's services) to
+# Stellar testnet, registers a demo service and writes deployments/<network>.json.
 #
 #   scripts/deploy-testnet.sh                  # testnet, Circle's testnet USDC
 #   TOKEN=test scripts/deploy-testnet.sh       # testnet, a self-issued FERMATATEST asset
@@ -33,6 +33,7 @@ build_tools
 log "identities on $NETWORK"
 for role in owner treasury vendor agent relayer; do ensure_key "$role" fund; done
 ensure_key verifier # signs verdicts only: never funded, never signs a transaction
+ensure_key ticket   # the agent's session tickets only: never funded, never signs a transaction
 OWNER="$(address_of owner)"
 TREASURY="$(address_of treasury)"
 VENDOR="$(address_of vendor)"
@@ -73,6 +74,14 @@ ESCROW="$OUT"
 DEPLOY_TX="$LAST_TX"
 WASM_HASH="$(sha256_hex <"$WASM")"
 
+log "deploying the session contract"
+submit stellar contract deploy --wasm "$SESSION_WASM" --source "$(key owner)" "${NET[@]}" \
+  -- --escrow "$ESCROW"
+SESSION="$OUT"
+SESSION_TX="$LAST_TX"
+SESSION_WASM_HASH="$(sha256_hex <"$SESSION_WASM")"
+[ "$(view "$SESSION" escrow | tr -d '"')" = "$ESCROW" ] || die "the session contract reads another escrow"
+
 log "registering the demo service '$LABEL'"
 VERIFIER_JSON="$(FERMATA_VERIFIER_SECRET="$(verifier_secret)" "$FV" pubkey)"
 VERIFIER_KEY="$(jq -r .public_key <<<"$VERIFIER_JSON")"
@@ -96,6 +105,8 @@ jq -n \
   --arg escrow "$ESCROW" --arg wasm_hash "$WASM_HASH" --arg deploy_tx "$DEPLOY_TX" \
   --arg deploy_ledger "$(tx_ledger "$DEPLOY_TX")" \
   --arg owner "$OWNER" --arg treasury "$TREASURY" --argjson fee_bps "$FEE_BPS" \
+  --arg session "$SESSION" --arg session_wasm_hash "$SESSION_WASM_HASH" \
+  --arg session_tx "$SESSION_TX" --arg session_ledger "$(tx_ledger "$SESSION_TX")" \
   --arg token_mode "$TOKEN" --arg asset "$ASSET" --arg sac "$TOKEN_SAC" \
   --arg service_id "$SERVICE_ID" --arg vendor "$VENDOR" --arg label "$LABEL" \
   --argjson price "$PRICE" --argjson window "$WINDOW" \
@@ -111,6 +122,8 @@ jq -n \
     escrow: {contract_id: $escrow, wasm_hash: $wasm_hash, deploy_tx: $deploy_tx,
              deploy_ledger: ($deploy_ledger | tonumber? // null),
              owner: $owner, treasury: $treasury, fee_bps: $fee_bps},
+    session: {contract_id: $session, wasm_hash: $session_wasm_hash, deploy_tx: $session_tx,
+              deploy_ledger: ($session_ledger | tonumber? // null)},
     token: {mode: $token_mode, asset: $asset, sac: $sac, decimals: 7},
     service: {id: $service_id, owner: $vendor, label: $label, payout: $vendor,
               price_per_call: $price, settlement_window: $window,
@@ -125,6 +138,7 @@ jq -n \
 log ""
 log "escrow     $(contract_link "$ESCROW")"
 log "deploy tx  $(tx_link "$DEPLOY_TX")"
+log "session    $(contract_link "$SESSION") ($(tx_link "$SESSION_TX"))"
 log "service    $SERVICE_ID ($(tx_link "$REGISTER_TX"))"
 log "token      $ASSET ($TOKEN_SAC)"
 log "wrote      ${DEPLOYMENT#"$ROOT"/}"
