@@ -12,10 +12,12 @@ env:
   # soroban-sdk 29 builds contracts only through `stellar contract build` (CLI 25.2 or newer).
   STELLAR_CLI_VERSION: "28.1.0"
   STELLAR_CLI_SHA256: "c1680deee94301d33ada7a17f98411e642a4248c727afbd2e43050d345746462"
+  # The local network the end-to-end job runs on: stellar-core 29.0.0, RPC 29.0.1 (2026-10-12).
+  QUICKSTART_IMAGE: "stellar/quickstart@sha256:4f8dfd693deba57fddef7f0bc722e4782c2e606c8675e3adc5438cebae249295"
 
 jobs:
   rust:
-    name: fmt, clippy, tests, contract build
+    name: fmt, clippy, tests, contract build, TS client drift
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -48,6 +50,126 @@ jobs:
       - name: Build the contract for wasm32v1-none
         run: stellar contract build --package fermata-escrow
 
+      - name: The committed TypeScript client matches the contract
+        run: bash packages/sdk/scripts/bindings.sh --check
+
+  attestor:
+    name: attestor (Rust 1.95.0, TLSNotary), with real MPC-TLS sessions
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: apps/attestor
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Rust toolchain from apps/attestor/rust-toolchain.toml
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: apps/attestor -> target
+
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Unit tests
+        run: cargo test --locked --release
+
+      # Five MPC-TLS proofs of the demo vendor through a notary process, one negative case per
+      # binding check (needs node and openssl, both on the runner).
+      - name: Integration test (real MPC sessions)
+        run: cargo test --locked --release --test attest attestor_end_to_end -- --ignored --nocapture
+
+  sdk:
+    name: TypeScript SDK
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: "22"
+      - name: pnpm (the version package.json pins, through corepack)
+        run: |
+          corepack enable
+          pnpm --version
+          pnpm install --frozen-lockfile
+      - run: pnpm sdk:typecheck
+      - run: pnpm sdk:test
+
+  e2e:
+    name: end to end on a local Stellar network (deploy, M0 cases, M1 cases with real proofs)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Start the local network (protocol 29)
+        run: |
+          docker run -d --name stellar --network host "$QUICKSTART_IMAGE" \
+            --local --enable core,rpc,horizon --protocol-version 29
+
+      - name: Rust toolchains (root and attestor)
+        run: |
+          rustup toolchain install
+          (cd apps/attestor && rustup toolchain install)
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: |
+            . -> target
+            apps/attestor -> target
+
+      - name: Stellar CLI ${{ env.STELLAR_CLI_VERSION }}
+        run: |
+          curl -sSfL -o stellar-cli.tar.gz \
+            "https://github.com/stellar/stellar-cli/releases/download/v${STELLAR_CLI_VERSION}/stellar-cli-${STELLAR_CLI_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${STELLAR_CLI_SHA256}  stellar-cli.tar.gz" | sha256sum -c -
+          tar -xzf stellar-cli.tar.gz stellar
+          sudo install -m 0755 stellar /usr/local/bin/stellar
+          stellar --version
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: "22"
+
+      - name: Build the contract, fermata-verdict and the attestor
+        run: |
+          stellar contract build --package fermata-escrow
+          cargo build --locked --release -p fermata-verdict
+          (cd apps/attestor && cargo build --locked --release)
+
+      - name: Wait for RPC and Friendbot
+        run: |
+          for _ in $(seq 120); do
+            curl -s -X POST -H 'content-type: application/json' \
+              -d '{"jsonrpc":"2.0","id":1,"method":"getHealth"}' http://localhost:8000/rpc |
+              grep -q '"healthy"' && break
+            sleep 2
+          done
+          for _ in $(seq 120); do
+            curl -sf "http://localhost:8000/friendbot?addr=GAJLQLBMTOP4SDCS4KMJTMN35T3RRKKHRVYTMYFVBMNHNYFJ5FETXJ2B" >/dev/null && break
+            sleep 2
+          done
+
+      - name: Deploy the escrow and the demo service
+        run: NETWORK=local scripts/deploy-testnet.sh
+
+      - name: M0 cases (verdicts signed by the script)
+        run: NETWORK=local scripts/demo-cases.sh
+
+      - name: M1 cases (real TLSNotary proofs through the attestor)
+        run: NETWORK=local scripts/attest-cases.sh
+
+      - name: The SDK's live parity test against the deployment
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile
+          FERMATA_DEPLOYMENT=deployments/local.json pnpm sdk:test
+
   vectors:
     name: golden vectors, independent Python/OpenSSL check
     runs-on: ubuntu-24.04
@@ -67,4 +189,4 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-      - run: shellcheck --version && shellcheck -x scripts/*.sh
+      - run: shellcheck --version && shellcheck -x scripts/*.sh packages/sdk/scripts/*.sh
