@@ -30,7 +30,7 @@ import { submitThroughChannels, type ChannelsConfig } from './channels.ts'
 import { decodeEscrowEvent, decodeTransfer, escrowEventsOf, type Held } from './events.ts'
 import { fromHex, type Hex } from './hex.ts'
 import type { Relayer } from './relayer.ts'
-import { NULL_ACCOUNT, contractOf, scAddress, scBigint, scHex32, sendAndWait, simulate, waitForTransaction } from './soroban.ts'
+import { NULL_ACCOUNT, contractOf, scAddress, scBigint, scHex32, simulate, submitWithRetries, waitForTransaction } from './soroban.ts'
 
 /** A call to hold: which escrow, which call id, for which service and request. */
 export type HoldCall = { escrow: string; callId: Hex; serviceId: Hex; requestHash: Hex }
@@ -182,19 +182,22 @@ export async function submitOwnHold(opts: {
 }): Promise<{ hash: Hex; ledger: number }> {
   const { server, networkPassphrase, keypair, terms } = opts
   const agent = keypair.publicKey()
-  const account = await server.getAccount(agent)
-  const tx = new TransactionBuilder(account, { fee: '100', networkPassphrase })
-    .addOperation(holdOperation(agent, terms))
-    .setTimeout(60)
-    .build()
-  const prepared = rpc.assembleTransaction(tx, await simulate(server, tx)).build()
-  // The envelope signature authorizes every source-account entry, so check the tree first.
-  for (const entry of prepared.toEnvelope().v1().tx().operations()[0]!.body().invokeHostFunctionOp().auth()) {
-    const problem = holdAuthorizationProblem(entry.rootInvocation(), agent, terms)
-    if (problem) throw new Error(`refusing to sign: ${problem}`)
+  const build = async () => {
+    const account = await server.getAccount(agent)
+    const tx = new TransactionBuilder(account, { fee: '100', networkPassphrase })
+      .addOperation(holdOperation(agent, terms))
+      .setTimeout(60)
+      .build()
+    const prepared = rpc.assembleTransaction(tx, await simulate(server, tx)).build()
+    // The envelope signature authorizes every source-account entry, so check the tree first.
+    for (const entry of prepared.toEnvelope().v1().tx().operations()[0]!.body().invokeHostFunctionOp().auth()) {
+      const problem = holdAuthorizationProblem(entry.rootInvocation(), agent, terms)
+      if (problem) throw new Error(`refusing to sign: ${problem}`)
+    }
+    prepared.sign(keypair)
+    return prepared
   }
-  prepared.sign(keypair)
-  const res = await sendAndWait(server, prepared, { timeoutMs: opts.timeoutMs })
+  const res = await submitWithRetries(server, build, { timeoutMs: opts.timeoutMs })
   return { hash: res.txHash, ledger: res.ledger }
 }
 

@@ -55,6 +55,17 @@ export async function waitForTransaction(
   }
 }
 
+/** A transaction the network did not accept; `retryable` when rebuilding it with a fresh sequence number may succeed. */
+export class SubmitError extends Error {
+  constructor(
+    message: string,
+    readonly retryable: boolean,
+  ) {
+    super(message)
+    this.name = 'SubmitError'
+  }
+}
+
 /** Sends a signed transaction and waits for it. */
 export async function sendAndWait(
   server: rpc.Server,
@@ -63,10 +74,33 @@ export async function sendAndWait(
 ): Promise<rpc.Api.GetSuccessfulTransactionResponse> {
   const sent = await server.sendTransaction(tx)
   if (sent.status === 'ERROR') {
-    throw new Error(`transaction rejected: ${sent.errorResult?.result().switch().name ?? 'unknown error'}`)
+    const code = sent.errorResult?.result().switch().name ?? 'unknown error'
+    throw new SubmitError(`transaction rejected: ${code}`, code === 'txBadSeq')
   }
-  if (sent.status === 'TRY_AGAIN_LATER') throw new Error('transaction not accepted (TRY_AGAIN_LATER)')
+  // One pending transaction per source account: another one from this account is in the queue.
+  if (sent.status === 'TRY_AGAIN_LATER') throw new SubmitError('transaction not accepted (TRY_AGAIN_LATER)', true)
   return waitForTransaction(server, sent.hash, opts)
+}
+
+/**
+ * Builds, signs and sends a transaction from an account, rebuilding it with the account's current
+ * sequence number when the network answers TRY_AGAIN_LATER or a bad sequence (another transaction
+ * from the same account got in first), up to `attempts` times.
+ */
+export async function submitWithRetries(
+  server: rpc.Server,
+  build: () => Promise<Transaction>,
+  opts: { attempts?: number; timeoutMs?: number } = {},
+): Promise<rpc.Api.GetSuccessfulTransactionResponse> {
+  const attempts = opts.attempts ?? 5
+  for (let i = 1; ; i++) {
+    try {
+      return await sendAndWait(server, await build(), opts)
+    } catch (e) {
+      if (!(e instanceof SubmitError) || !e.retryable || i >= attempts) throw e
+      await new Promise((r) => setTimeout(r, 1_000 * i))
+    }
+  }
 }
 
 // ----------------------------------------------------------------------------------- ScVal reading

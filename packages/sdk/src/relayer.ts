@@ -3,7 +3,7 @@
 // Fermata's serialized wallet writes (apps/gateway/src/chain.ts @ d7cc642), one invocation at a time,
 // because each spends the account's next sequence number.
 import { Keypair, Operation, TransactionBuilder, rpc, xdr } from '@stellar/stellar-sdk'
-import { sendAndWait, simulate } from './soroban.ts'
+import { simulate, submitWithRetries } from './soroban.ts'
 
 export type Invocation = { func: xdr.HostFunction; auth: xdr.SorobanAuthorizationEntry[] }
 
@@ -52,18 +52,22 @@ export class Relayer {
     const op =
       invocation instanceof xdr.Operation ? invocation : Operation.invokeHostFunction({ func: invocation.func, auth: invocation.auth })
     const hasAuth = !(invocation instanceof xdr.Operation) && invocation.auth.length > 0
-    const account = await this.server.getAccount(this.address)
     const fee = String(this.opts.inclusionFeeStroops ?? 100)
-    const tx = new TransactionBuilder(account, { fee, networkPassphrase: this.networkPassphrase })
-      .addOperation(op)
-      .setTimeout(60)
-      .build()
-    const sim = await simulate(this.server, tx, hasAuth ? 'enforce' : undefined)
-    check?.(sim)
-    const prepared = rpc.assembleTransaction(tx, sim).build()
     const max = this.opts.maxFeeStroops ?? 10_000_000
-    if (Number(prepared.fee) > max) throw new Error(`fee ${prepared.fee} stroops is above the relayer's limit of ${max}`)
-    prepared.sign(this.keypair)
-    return sendAndWait(this.server, prepared, { timeoutMs: this.opts.timeoutMs })
+    const build = async () => {
+      const account = await this.server.getAccount(this.address)
+      const tx = new TransactionBuilder(account, { fee, networkPassphrase: this.networkPassphrase })
+        .addOperation(op)
+        .setTimeout(60)
+        .build()
+      const sim = await simulate(this.server, tx, hasAuth ? 'enforce' : undefined)
+      check?.(sim)
+      const prepared = rpc.assembleTransaction(tx, sim).build()
+      if (Number(prepared.fee) > max) throw new Error(`fee ${prepared.fee} stroops is above the relayer's limit of ${max}`)
+      prepared.sign(this.keypair)
+      return prepared
+    }
+    // Another process may use the same account: rebuild on a sequence clash.
+    return submitWithRetries(this.server, build, { timeoutMs: this.opts.timeoutMs })
   }
 }
