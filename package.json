@@ -1,0 +1,16 @@
+{
+  "name": "fermata-stellar",
+  "private": true,
+  "type": "module",
+  "description": "Fermata on Stellar: pay-on-proof escrow for machine payments (TypeScript workspace)",
+  "license": "Apache-2.0",
+  "packageManager": "pnpm@10.28.0",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "sdk:test": "pnpm -F fermata-stellar-sdk test",
+    "sdk:typecheck": "pnpm -F fermata-stellar-sdk typecheck",
+    "sdk:bindings": "bash packages/sdk/scripts/bindings.sh"
+  }
+}

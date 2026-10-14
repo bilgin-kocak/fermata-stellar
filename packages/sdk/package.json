@@ -1,0 +1,32 @@
+{
+  "name": "fermata-stellar-sdk",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Fermata on Stellar: a typed client for the escrow, the verdict encoding and the registration hashes, checked against the repository's golden vectors.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "sideEffects": false,
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "bindings": "bash scripts/bindings.sh",
+    "bindings:check": "bash scripts/bindings.sh --check"
+  },
+  "dependencies": {
+    "@noble/ed25519": "^3.1.0",
+    "@noble/hashes": "^2.2.0",
+    "@stellar/stellar-sdk": "^16.3.1",
+    "buffer": "6.0.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.0",
+    "typescript": "~5.9.3",
+    "vitest": "^5.0.4"
+  }
+}
