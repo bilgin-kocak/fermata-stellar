@@ -7,6 +7,7 @@
 mod setup;
 
 mod admin;
+mod attest_vector;
 mod hold;
 mod invariants;
 mod lifecycle;
