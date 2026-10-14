@@ -51,23 +51,23 @@ test)
   ;;
 *) die "TOKEN must be usdc or test, got '$TOKEN'" ;;
 esac
-TOKEN_SAC="$(stellar contract id asset --asset "$ASSET" --network "$NETWORK")"
+TOKEN_SAC="$(stellar contract id asset --asset "$ASSET" "${NET[@]}")"
 if ! view "$TOKEN_SAC" decimals >/dev/null; then
   log "  deploying the Stellar Asset Contract for $ASSET"
-  submit stellar contract asset deploy --asset "$ASSET" --source "$(key owner)" --network "$NETWORK"
+  submit stellar contract asset deploy --asset "$ASSET" --source "$(key owner)" "${NET[@]}"
 fi
 # Classic accounts hold an issued asset only through a trustline: the agent pays, the vendor
 # (the demo service's payout) and the treasury receive.
 for role in agent vendor treasury; do
-  submit stellar tx new change-trust --source "$(key "$role")" --line "$ASSET" --network "$NETWORK"
+  submit stellar tx new change-trust --source "$(key "$role")" --line "$ASSET" "${NET[@]}"
 done
 if [ "$TOKEN" = test ]; then
   submit stellar tx new payment --source "$(key issuer)" --destination "$AGENT" \
-    --asset "$ASSET" --amount "$TEST_FUNDS" --network "$NETWORK"
+    --asset "$ASSET" --amount "$TEST_FUNDS" "${NET[@]}"
 fi
 
 log "deploying the escrow (fee $FEE_BPS bps)"
-submit stellar contract deploy --wasm "$WASM" --source "$(key owner)" --network "$NETWORK" \
+submit stellar contract deploy --wasm "$WASM" --source "$(key owner)" "${NET[@]}" \
   -- --owner "$OWNER" --treasury "$TREASURY" --fee_bps "$FEE_BPS"
 ESCROW="$OUT"
 DEPLOY_TX="$LAST_TX"

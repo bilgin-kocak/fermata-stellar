@@ -92,7 +92,7 @@ pids+=($!)
 for p in "$OK_PORT" "$E500_PORT" "$HANG_PORT" "$NOTARY_PORT"; do wait_port "$p"; done
 NOTARY_KEY_HASH="$(jq -r .notaryKeyHash "$LOGS/notary.json")"
 
-attestor_args=(--network "$NETWORK" --escrow "$ESCROW")
+attestor_args=(--network "$NETWORK" --network-passphrase "$PASSPHRASE" --escrow "$ESCROW")
 [ -n "${RPC_URL:-}" ] && attestor_args+=(--rpc "$RPC_URL")
 FERMATA_VERIFIER_SECRET="$(verifier_secret)" "$ATTEST" serve "${attestor_args[@]}" \
   --listen "127.0.0.1:$ATTESTOR_PORT" --notary "127.0.0.1:$NOTARY_PORT" --ca "$CA" \
@@ -167,7 +167,7 @@ settle() { # call_id (with ATTEST_JSON)
 }
 
 event_param() { # from_ledger event_name call_id param
-  stellar events --network "$NETWORK" --id "$ESCROW" --start-ledger "$1" --count 100 \
+  stellar events "${NET[@]}" --id "$ESCROW" --start-ledger "$1" --count 100 \
     --output json 2>/dev/null |
     jq -r --arg name "$2" --arg call "$3" --arg p "$4" \
       'select(.event_name == $name and .params.call_id == $call) | .params[$p]' | head -1

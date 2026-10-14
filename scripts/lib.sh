@@ -25,14 +25,20 @@ FV="$ROOT/target/release/fermata-verdict"
 WASM="$ROOT/target/wasm32v1-none/release/fermata_escrow.wasm"
 ATTEST="$ROOT/apps/attestor/target/release/fermata-attest"
 
+# NET: the network flags every `stellar` command gets. A local quickstart network is named by its
+# RPC URL and passphrase rather than the CLI's built-in `local`, because it may run with another
+# passphrase: LOCAL_PASSPHRASE (CI starts it with testnet's, so that libraries that know only the
+# testnet and mainnet passphrases run against it unmodified).
 case "$NETWORK" in
 testnet)
   PASSPHRASE="Test SDF Network ; September 2015"
   EXPLORER="https://stellar.expert/explorer/testnet"
+  NET=(--network testnet)
   ;;
 local)
-  PASSPHRASE="Standalone Network ; February 2017"
+  PASSPHRASE="${LOCAL_PASSPHRASE:-Standalone Network ; February 2017}"
   EXPLORER=""
+  NET=(--rpc-url "${RPC_URL:-http://localhost:8000/rpc}" --network-passphrase "$PASSPHRASE")
   ;;
 *)
   echo "NETWORK must be testnet or local, got '$NETWORK'" >&2
@@ -65,7 +71,7 @@ address_of() { stellar keys public-key "$(key "$1")"; }
 
 # The CLI exits 0 with no entries for an account that does not exist.
 account_exists() {
-  stellar ledger entry fetch account --account "$1" --network "$NETWORK" 2>/dev/null |
+  stellar ledger entry fetch account --account "$1" "${NET[@]}" 2>/dev/null |
     jq -e '.entries | length > 0' >/dev/null
 }
 
@@ -75,11 +81,11 @@ ensure_key() {
   local name
   name="$(key "$1")"
   if ! stellar keys public-key "$name" >/dev/null 2>&1; then
-    stellar keys generate "$name" --network "$NETWORK" >/dev/null
+    stellar keys generate "$name" "${NET[@]}" >/dev/null
     log "  created identity $name in the Stellar CLI keystore"
   fi
   if [ "${2:-}" = fund ] && ! account_exists "$(stellar keys public-key "$name")"; then
-    stellar keys fund "$name" --network "$NETWORK" >/dev/null
+    stellar keys fund "$name" "${NET[@]}" >/dev/null
     log "  funded $name with Friendbot"
   fi
 }
@@ -105,7 +111,7 @@ invoke() {
   local role="$1"
   shift
   submit stellar contract invoke --id "$ESCROW" --source "$(key "$role")" \
-    --network "$NETWORK" -- "$@"
+    "${NET[@]}" -- "$@"
 }
 
 # view CONTRACT FN ARGS...: simulates a read-only call and prints the JSON result.
@@ -113,7 +119,7 @@ view() {
   local contract="$1"
   shift
   stellar contract invoke --id "$contract" --source "$(key relayer)" \
-    --network "$NETWORK" --send=no -- "$@" 2>/dev/null
+    "${NET[@]}" --send=no -- "$@" 2>/dev/null
 }
 
 balance() { view "$TOKEN_SAC" balance --id "$1" | tr -d '"'; }
@@ -154,7 +160,7 @@ build_attestor() {
   [ -x "$ATTEST" ] || die "no attestor at $ATTEST"
 }
 
-latest_ledger() { stellar ledger latest --network "$NETWORK" --output json | jq -r .sequence; }
+latest_ledger() { stellar ledger latest "${NET[@]}" --output json | jq -r .sequence; }
 
 # sha256 of stdin as hex (sha256sum on Linux, shasum on macOS).
 sha256_hex() {
