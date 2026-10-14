@@ -5,7 +5,8 @@ replaced or deferred, and why. Section 4 lists every intentional difference from
 `FermataEscrow.sol`.
 
 It was written in Milestone 0, step 1, before any Stellar code. It was updated at the end of the
-milestone with the decisions taken (section 7) and what the implementation showed.
+milestone with the decisions taken (section 7) and what the implementation showed. Section 9 is
+the plan for Milestone 1 (the attestor and the TypeScript SDK), written before its code.
 
 ## Sources
 
@@ -313,3 +314,93 @@ notice.
 - **Documentation text.** "What the proof does and does not establish", the trust model and the
   security policy are adapted from Fermata `README.md` and `SECURITY.md` @ `d7cc642`, and WebProof
   `docs/trust-model.md`.
+
+## 9. Milestone 1 plan: the attestor and the TypeScript SDK
+
+Written 2026-10-14, before any Milestone 1 code. The escrow and `fermata-verdict` from M0 do not
+change.
+
+### Facts checked for M1
+
+| Fact | Value | Source |
+|---|---|---|
+| TLSNotary | `tlsn` v0.1.0-alpha.15, git only, pinned to rev `47aee45b`. MSRV 1.95, declared by the `mpz` crates. Fermata's lockfile has 325 packages. | Fermata `apps/attestor/Cargo.toml` and `Cargo.lock`; Fermata `docs/FACTS.md` §12 |
+| It builds and proves here | Fermata's attestor @ `d7cc642`, built in a scratch copy outside this repository with rustc 1.95.0: the release build took 2 min 58 s on 4 vCPUs. Its MPC integration test passed: five proofs of the demo vendor at 1.4 to 2.1 s each, about 62 MB sent and 3.9 MB received between prover and notary per session, and a 2,132-byte presentation. These numbers come from Fermata's code and the local demo vendor in this container; they are not Stellar measurements. | Scratch run, 2026-10-14 |
+| Ledger time | RPC `getLatestLedger` returns `closeTime` (unix seconds) | Local quickstart, RPC 29.0.1 |
+| Read-only calls | `simulateTransaction` accepts a transaction whose source account has never existed (`GAAAA…WHF`, sequence 1) and returns the view's value. Reading `get_hold` and `get_service` needs no funded account and no key. | Local quickstart, `get_service` |
+| Return values | A `#[contracttype]` struct comes back as an `ScMap` keyed by field-name symbols in sorted order, and `None` as `Void`. | Same |
+| TypeScript bindings | `stellar contract bindings typescript` (CLI 28.1.0) generates a typed client: 330 lines, with the contract's doc comments and error codes, depending on `@stellar/stellar-sdk` ^16. The current release is 17.2.1 (Node 22.12 or newer). | CLI; npm registry |
+| Local image | `stellar/quickstart@sha256:4f8dfd69…` (stellar-core 29.0.0, RPC 29.0.1), started with `--protocol-version 29` | `docker inspect` |
+
+### Components
+
+| Fermata (`apps/attestor` @ `d7cc642` unless named) | Decision | On Stellar |
+|---|---|---|
+| `prove.rs`, `notary.rs`, `tunnel.rs`, `http_raw.rs`, `predicate.rs`, `config.rs` | keep | `apps/attestor/src/`, copied with a source header. **Unchanged:** MPC-TLS through a separate notary; hiding the values of `Authorization`, `Cookie` and `Proxy-Authorization`; SECP256K1ETH attestations; retries and timeouts; the CONNECT tunnel; the content-addressed predicate store. |
+| `verify.rs` | keep, re-wired | The same seven binding checks in the same order, the same session-time skew, the same predicate stage, and `reverify` for `--offline`. Signing goes through `fermata-verdict`. |
+| `eip712.rs` | replace | `crates/fermata-verdict` as a path dependency: Ed25519 over the section 3 message, with the network passphrase and the escrow contract id as the domain |
+| `hashes.rs` | replace by the M0 port | `fermata-verdict::hashes`: the same definitions and vectors |
+| `chain.rs` | replace | `SorobanChain`, using the `stellar-xdr` crate for XDR. **Reads:** `simulateTransaction` of `get_hold` and `get_service` from the null source account, and `getLatestLedger.closeTime` for chain time. **Startup:** `getNetwork` checks the passphrase. The `ChainView` trait and `MockChain` stay. |
+| `serve.rs` | keep, re-wired | **Same API:** `/healthz`, `/v1/prove`, `/v1/verify`, `/v1/attest`, `/v1/reverify` and `/v1/presentations/<callId>`, with the same error codes (422 for a failed binding check, 502 when there is no transcript) and proving in a child process. **Changed:** `/healthz` reports the network, the escrow and the verifier's `G…` key. |
+| `main.rs` | adapt | **Same subcommands:** `notary`, `prove`, `verify [--offline]`, `serve`, `hashes`. **Chain flags:** `--network testnet\|local\|mainnet` (or `--network-passphrase`), `--rpc` (`STELLAR_RPC_URL`) and `--escrow C…` (`FERMATA_ESCROW`). **Key:** the verdict key comes from `FERMATA_VERIFIER_SECRET` (`S…` or hex), as in the `fermata-verdict` CLI. |
+| `tests/attest.rs` | adapt | **Unchanged:** real MPC sessions against the demo vendor (ok, 500, truncated, hang) through a notary process, a `MockChain`, one negative case per binding check, tampering, and no transcript. **Changed:** signatures are checked with `fermata-verdict::verify` instead of `ecrecover`, and the test writes `test-vectors/attest-v1.json`. |
+| `contracts/test/AttestVector.t.sol` (the 3 deferred tests) | adapt | `contracts/escrow/src/tests/attest_vector.rs`. The escrow is registered at the vector's contract id and settles the real DELIVERED and FAILED verdicts from `attest-v1.json`. |
+| `apps/vendor` | keep | `apps/vendor`, unchanged: TLS 1.2 with ECDHE-ECDSA-AES128-GCM-SHA256 on P-256, and the CHAOS modes |
+| `scripts/e2e-attest.sh`, `scripts/attest-e2e.ts` | adapt | `scripts/attest-cases.sh` (bash and the Stellar CLI, like M0's scripts), for `NETWORK=local` and `NETWORK=testnet` |
+| `packages/sdk`: `hashes.ts`, `requestHash.ts` | keep | `packages/sdk/src/`, on `@noble/hashes` instead of viem, with Fermata's TypeScript vectors |
+| `packages/sdk`: `serviceId.ts`, `verdict.ts` | replace | The Stellar versions: the service id from the owner's address XDR, the 294-byte verdict message, and Ed25519 signing and verification |
+| `packages/sdk`: `abi.ts`, `escrow.ts`, `chain.ts`, `tip20.ts`, `deployments.ts` | replace | The generated client (`stellar contract bindings typescript`), committed. A CI check regenerates it from the built Wasm and fails if the file changes. |
+| `packages/sdk`: `method.ts`, `client.ts`, `server.ts`, `scores.ts`, `logs.ts`, `eventually.ts` | defer | M2: the MPP and x402 methods, reconciliation and scores |
+
+### Differences from Fermata's attestor
+
+1. **Verdict output.** Verdicts are signed with Ed25519 through `fermata-verdict`. The JSON gives
+   the 294-byte message, the 64-byte signature and the signer's `G…` key, instead of the EIP-712
+   digest, the 65-byte signature and an address.
+2. **Chain reads** go through Soroban RPC simulation. An unknown call is `None` from `get_hold`,
+   read as Fermata's status 0. The re-read of an unknown hold (for up to 6 s, because a
+   load-balanced RPC can lag behind the hold) is kept.
+3. **Flag and variable names** follow Stellar, as listed under `main.rs` above.
+4. **Hashes kept.** `presentation_hash` and `response_hash` stay keccak256 of the presentation and
+   of the received bytes. The escrow treats them as opaque values.
+
+### The three canonical cases with real proofs
+
+`scripts/attest-cases.sh` runs after `scripts/deploy-testnet.sh` on the same network:
+
+1. **Start the processes.**
+   - Three demo vendors (ok, 500, hang) on local ports.
+   - A notary with a key generated for this run. The key exists only in the script's memory, so
+     nothing secret is written anywhere.
+   - `fermata-attest serve`, with the verifier key from the keystore.
+2. **Register three services** (labels with a run suffix). They pin the vendors' origins, that
+   notary's key hash, `predicates/quote-v1.json` and the verifier key.
+3. **DELIVERED.** Hold, then `POST /v1/attest`, then settle with the attestor's verdict. Checks:
+   - the vendor is paid, and the `released` event carries the presentation hash;
+   - the downloaded presentation's keccak256 equals that hash;
+   - `verify --offline`, given the hashes read from `get_service` and `get_hold`, reports the same
+     outcome and no mismatch;
+   - the `Authorization` value is not in the presentation.
+4. **Replay.** A new hold for the same request: the old presentation fails the Call check.
+5. **FAILED.** The vendor's authenticated 500 gives a FAILED verdict, and settling refunds the
+   agent.
+6. **NO PROOF.** The vendor never answers: HTTP 502 `no-transcript` and no verdict. After the
+   window, `claim_timeout` refunds the agent, for this hold and the replay hold.
+
+The script prints stellar.expert links on testnet and exits non-zero if any check fails.
+
+### CI
+
+- **attestor**: Rust 1.95.0, fmt, clippy `-D warnings`, the unit tests, and the MPC integration
+  test (it needs `node` and `openssl`; the runner has both).
+- **sdk**: Node 22, pnpm through corepack, typecheck, tests, and the bindings drift check.
+- **e2e**: the quickstart image pinned by digest, then `deploy-testnet.sh` and `attest-cases.sh`
+  with `NETWORK=local`.
+
+### Not in M1
+
+- **Moved to M2:** the gateway and the payment methods (MPP, x402), the dashboard, the MCP server,
+  vendor scores, session escrow and sampled proving.
+- **Ported but not run in CI:** proving a third-party vendor (Fermata's npm registry test), kept as
+  an ignored test.
+- **Still blocked:** the testnet run needs the same network access as M0's.
