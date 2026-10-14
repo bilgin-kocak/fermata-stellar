@@ -20,9 +20,12 @@ contract enforces several things:
 
 What the contract cannot check is whether a verdict is true. Every attestor verdict points at a
 presentation that anyone can re-verify offline against the hashes the escrow stores, so a
-dishonest verdict is detectable, though not prevented. In this milestone the attestor's operator
+dishonest verdict is detectable, though not prevented. In these milestones the attestor's operator
 also runs the notary, so the evidence is only as independent as that operator (see "Who runs the
 notary"). The trust-minimization items at the end are about prevention.
+
+Since Milestone 2, agents pay through a gateway. It submits holds and settlements, but it cannot
+move held money or change what an agent authorized (see "The gateway").
 
 ## Parties
 
@@ -31,10 +34,13 @@ notary"). The trust-minimization items at the end are about prevention.
 | Agent | Pays for one API call by authorizing `hold` (and the token transfer inside it) | Stellar account |
 | Vendor | Registers a service (owner), receives `price − fee` on DELIVERED | Stellar account |
 | Verifier | Signs DELIVERED or FAILED verdicts for the services that pin its public key | Ed25519 key, used for verdicts only |
-| Relayer | Submits `settle` or `claim_timeout`; can be anyone, gains nothing | Any Stellar account |
+| Relayer | Submits `settle` or `claim_timeout`; can be anyone, gains nothing. The gateway's relayer also submits sponsored holds and pays their fees | Any Stellar account |
 | Escrow owner | Changes the fee (at most 5 %) and the treasury | Stellar account |
 | Attestor (`fermata-attest`) | Proves the vendor's HTTPS response with TLSNotary, checks it against the escrow, signs the verdict | The verifier key; no Stellar account (it reads the escrow by simulation) |
 | Notary | Takes part in MPC-TLS without seeing plaintext and signs an attestation of the commitments | A secp256k1 key, pinned per service by its hash |
+| Gateway | Sells calls to agents over MPP and x402, submits holds and settlements, sweeps timed-out holds, indexes events | The relayer account and an HMAC key for its challenges |
+| OpenZeppelin Channels (optional) | Submits sponsored holds from its own accounts and pays their fees | Its own accounts and API keys |
+| x402 facilitator for `exact` (optional) | Settles the unprotected x402 option, a direct payment to the vendor | Its own account |
 
 ## What the contract enforces
 
@@ -82,11 +88,49 @@ notary"). The trust-minimization items at the end are about prevention.
 - **A vendor** trusts the verifier to sign DELIVERED when it delivered. The attestor signs
   DELIVERED when the presentation passes the predicate the vendor registered.
 - **An agent** trusts the verifier not to sign DELIVERED for a failed call, and chooses which
-  escrows and verifiers it pays into. The TypeScript SDK's `isTrustedService` checks a service's
-  verifier key (and optionally its token) against the agent's allow-list before it holds money;
-  the M2 gateway client will enforce it, as Fermata's Tempo SDK does.
+  escrows and verifiers it pays into. The SDK's MPP and x402 clients check, before anything is
+  signed:
+  - the escrow and the service's verifier key, against the agent's allow-lists;
+  - the price and the settlement window, against its limits.
+
+  They refuse otherwise; the live tests cover an untrusted verifier, an untrusted escrow and
+  another network.
 - **Both** rely on the timeout. An agent whose call got no verdict is refunded after the window,
   without anyone's cooperation.
+
+## The gateway
+
+The gateway is the agent's counterparty for the HTTP call. In these milestones its operator also
+runs the attestor and the notary.
+
+- **What the agent's authorization fixes.** For a sponsored hold, the agent signs a Soroban
+  authorization entry for one `hold`. That entry names:
+  - the escrow, the call id, the service and the request hash;
+  - one inner token transfer of exactly the price into the escrow;
+  - an expiry a few minutes ahead at most. The gateway accepts up to 5 minutes for MPP and
+    60 seconds for x402, plus 10 ledgers of clock skew.
+
+  The gateway, or OpenZeppelin Channels, can submit that entry or not submit it. It cannot change
+  the entry, spend it twice (the escrow refuses a used call id), or reuse it after it expires.
+- **What the gateway can do.**
+  - **Refuse or stall.** It can refuse to serve, or never ask for a proof. The hold then times out
+    and anyone, the gateway's sweeper included, refunds the agent.
+  - **Return the wrong bytes.** It can answer the agent with something other than the proved
+    response. Every receipt names the call, so the agent can fetch the presentation and re-verify
+    it offline.
+  - **Forge evidence.** Because it runs the notary, a dishonest operator could forge a transcript;
+    offline re-verification cannot tell (see "Who runs the notary").
+- **What it cannot do.** Move held money anywhere but along the escrow's paths, or settle a call
+  without a verdict signed by the service's verifier.
+- **Replays.** A credential or an x402 payment is accepted once:
+  - MPP challenges are HMAC-bound to the gateway, the request and a call id it minted;
+  - x402 requirements carry a call id that is an HMAC over the request and an expiry;
+  - the escrow refuses a second hold for the same call id.
+- **OpenZeppelin Channels**, when configured, sees the signed hold before it lands. It can delay
+  it or drop it (the agent then pays nothing), but it cannot change it.
+- **The unprotected options** (Stellar's MPP Charge and x402 `exact`) are direct payments to the
+  vendor's account. They carry none of these guarantees: no escrow, no proof, no refund. With x402
+  `exact`, the agent also trusts the facilitator that settles it, as in any x402 payment.
 
 ## What the proof does and does not establish
 
@@ -115,8 +159,9 @@ Ported from Fermata's README. The attestor here is Fermata's, so the same limits
 ## Who runs the notary and the prover
 
 The prover runs inside the attestor and the notary is a separate process, both run by the
-operator. That is how Fermata's Tempo demo works, and how `scripts/attest-cases.sh` works here; the
-script makes a new notary key for each run and registers services that pin it. A prover and a
+operator. That is how Fermata's Tempo demo works, and how `scripts/attest-cases.sh` and
+`scripts/gateway-cases.sh` work here; each script makes a new notary key for its run and registers
+services that pin it. A prover and a
 notary run by the same party could collude to produce a presentation for bytes the server never
 sent. Offline re-verification shows the evidence is consistent with the chain; it becomes evidence
 independent of the operator only when someone else runs the notary. Each service pins a notary key

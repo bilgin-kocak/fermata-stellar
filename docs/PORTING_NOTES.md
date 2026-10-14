@@ -7,8 +7,9 @@ replaced or deferred, and why. Section 4 lists every intentional difference from
 It was written in Milestone 0, step 1, before any Stellar code. It was updated at the end of the
 milestone with the decisions taken (section 7) and what the implementation showed. Section 9 is
 Milestone 1 (the attestor and the TypeScript SDK): the plan written before its code, and what the
-implementation showed. Section 10 is the plan for Milestone 2 (the gateway, its payment methods and
-reconciliation from events), with the decisions the owner took before its code.
+implementation showed. Section 10 is Milestone 2 (the gateway, its payment methods and reconciliation
+from events): the plan, the decisions the owner took before its code, and what the implementation
+showed.
 
 ## Sources
 
@@ -460,7 +461,7 @@ repository owner before the code was written.
 | x402 on Stellar | `@x402/core`, `@x402/stellar` and `@x402/hono` 2.28.0 (2026-09-29); `@x402/stellar` depends on `@stellar/stellar-sdk ^16.3.0`. Stellar has only the `exact` scheme: the client signs the auth entries of a SEP-41 `transfer`, and the facilitator rebuilds the transaction, pays the fee and submits it. Schemes are pluggable through client, server and facilitator interfaces in `@x402/core`. | npm; `x402-foundation/x402` @ `e95b066` `specs/schemes/exact/scheme_exact_stellar.md`; `@x402/core` types |
 | An escrow scheme in x402 | `auth-capture` (draft v1.1, 2026-08-18) has an `escrow` flow: `authorize` holds the funds before the resource runs, then `capture` or `void`, and the client can `reclaim` after a capture deadline. Only an EVM binding exists. The scheme also has partial capture and `refund` after capture, which Fermata's escrow does not have. | `specs/schemes/auth-capture/scheme_auth_capture.md` |
 | OpenZeppelin's x402 facilitator | The hosted facilitator (`channels.openzeppelin.com/x402/testnet`, API key from a web form) is the Relayer plugin `@openzeppelin/relayer-plugin-x402-facilitator` 0.5.0. It accepts only `exact` (`schemes = ["exact"]`, and `verify` rejects any other scheme) and is AGPL-3.0, like the Relayer itself. | `OpenZeppelin/relayer-plugin-x402-facilitator` @ `7583ebc` `src/types.ts`, `src/stellar/verify.ts`; `OpenZeppelin/openzeppelin-relayer` @ `6646ed9` `LICENSE` |
-| OpenZeppelin's Channels service | `@openzeppelin/relayer-plugin-channels` 0.21.0 (MIT) submits any Soroban invocation given as `func` plus signed `auth` entries, through channel accounts, with a fee bump paid by its fund account. It is hosted at `channels.openzeppelin.com/testnet` (API key from a web form) or runs in a self-hosted Relayer. | `OpenZeppelin/relayer-plugin-channels` @ `c7cf073`, README "Submit with Function and Auth" |
+| OpenZeppelin's Channels service | `@openzeppelin/relayer-plugin-channels` 0.21.0 submits any Soroban invocation given as `func` plus signed `auth` entries, through channel accounts, with a fee bump paid by its fund account. It is hosted at `channels.openzeppelin.com/testnet` (API key from a web form) or runs in a self-hosted Relayer. Its `package.json` declares MIT and its repository's `LICENSE` file is AGPL-3.0; this repository uses only its HTTP API. | `OpenZeppelin/relayer-plugin-channels` @ `c7cf073`, README "Submit with Function and Auth", `package.json`, `LICENSE` |
 | Networks in those libraries | `@stellar/mpp` and `@x402/stellar` know only the testnet and mainnet passphrases; their RPC URLs can be changed. The quickstart image reads `NETWORK_PASSPHRASE` from the environment in `--local` mode, and a local network started with the testnet passphrase reported it from `getNetwork`. | `@stellar/mpp` `sdk/src/constants.ts`; `@x402/stellar` 2.28.0; quickstart `/start` line 252; a local run |
 | Events | Stellar RPC keeps transactions and events for `history-retention-window` = 120,960 ledgers (about 7 days) by default. `getEvents` returns 100 events by default and at most 10,000 per call (`max-events-limit`). Providers choose their own values. Older history needs a Galexie data lake, Hubble (BigQuery) or a third-party indexer (Mercury, SubQuery, Goldsky). | `stellar/stellar-rpc` @ `40277d1` `cmd/stellar-rpc/internal/config/options.go`; SDF skill `data/SKILL.md` |
 | Session escrow, sampled proving | Not built in Fermata. Its README lists them under "The production shape, none of it built yet", and notes that sampling changes the guarantee: an unproved call cannot be proved later. | Fermata `README.md`, "Economics" |
@@ -513,3 +514,53 @@ The repository owner took the recommended option on each question (2026-10-14).
 
 The indexer is our own unless the owner prefers a third-party one: it runs on a local network
 and in CI, and keeps history from the moment it starts.
+
+### What the implementation showed
+
+Written when the gateway half of Milestone 2 was done. Session escrow and sampled proving are not
+started (decision 4).
+
+- **The plan held.** Every component in the table above was built as planned, and neither the
+  escrow nor the attestor changed. `scripts/gateway-cases.sh` passes its 8 calls and 42 checks on a
+  local network and in CI.
+- **One name changed.** The plan called the credential for a hold the agent submits itself `hash`,
+  after Stellar's Charge. It is `hold`, the name of Fermata's credential, whose payload it keeps;
+  `transaction` is the new one.
+- **Stellar's libraries on a local network.**
+  - **Passphrases.** `@stellar/mpp` and `@x402/stellar` know only testnet's and mainnet's
+    passphrases. A quickstart network started with testnet's passphrase (`NETWORK_PASSPHRASE`)
+    runs both unmodified; CI does this, with keys made for the run.
+  - **HTTPS.** Stellar's Charge refuses a plain-HTTP RPC URL, since it sets no `allowHttp`. On a
+    local network the gateway and the agent therefore reach the RPC through a small HTTPS proxy
+    with a certificate made for the run (`scripts/lib/tls-proxy.mjs`).
+  - **Ports.** The quickstart image uses ports 8001 to 8004 itself (8001 is its Horizon), so the
+    proxy listens on 7443.
+  - **Assets.** x402 clients refuse assets outside a default list. The agent in the cases allows
+    any asset (`spendControls: { allowedAssets: true }`), because a local network's token is
+    self-issued.
+- **One pending transaction per account.** Stellar answers `TRY_AGAIN_LATER` to a second
+  transaction from an account that has one pending, and `txBadSeq` to a stale sequence number. The
+  relayer and the agent's own holds rebuild and resubmit in those cases, and the SDK's live test
+  files run one after another.
+- **The pinned dependency.** pnpm recorded `@stellar/mpp`'s commit as an SSH git URL, because its
+  probe for a public repository fails behind this build environment's proxy. CI has no SSH key,
+  so it could not clone it. The dependency is now an HTTPS git URL at the same commit.
+- **CI caught a race.** In one CI run, the x402 release (B1) settled correctly but its record lost
+  the hold transaction.
+  - **Cause.** The sweeper had listed the call while its hold was being submitted. It then wrote
+    over the record the request had moved on, because a record update is a read-modify-write.
+  - **Fix.** Calls are now in flight from before their first record. The sweeper skips them and
+    reads each record again before acting, and two tests reproduce the interleavings.
+- **Process cleanup.** The cases script recorded the pid of the subshell that started the gateway,
+  so the gateway outlived the script. The subshell now execs it.
+- **The attestor on a custom passphrase.** `fermata-attest` needs `--rpc` for any network other
+  than testnet and mainnet, and the scripts now always pass it. A CI run caught this when the
+  scripts began naming a local network by its passphrase.
+- **OpenZeppelin's Channels plugin.** Its `package.json` declares MIT, while its repository's
+  `LICENSE` file is AGPL-3.0. This repository uses only its HTTP API, through a small client
+  written against the documented request and answer, so no code is copied.
+- **Measured here.** On a local network, each proof in the M2 cases took 1.1 to 1.3 s across two
+  runs, with one attempt each. The CI step takes about three minutes, most of it waiting out the hang cases'
+  120 s window. Neither has been measured on testnet.
+- **Not tried yet:** testnet, OpenZeppelin's hosted Channels service and x402 facilitator, and
+  Circle's USDC faucet. The build environment's network policy refuses all of them.

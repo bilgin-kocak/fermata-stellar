@@ -10,7 +10,7 @@ Adapted from Fermata's `SECURITY.md` (bilgin-kocak/fermata @ d7cc642) for the St
   quickstart networks. There is no mainnet deployment; a security audit comes before one
   ([`ROADMAP.md`](../ROADMAP.md), M3).
 - **Trust model.** The escrow trusts one Ed25519 verifier key per service. The attestor holds it
-  and signs only after a TLSNotary presentation passes its checks; in this milestone the same
+  and signs only after a TLSNotary presentation passes its checks; in these milestones the same
   operator runs the notary. See [`trust-model.md`](trust-model.md).
 - **Dependencies.** Pinned:
   - **Contract and verdict crate.** `soroban-sdk` 29.0.1 (exact versions in `Cargo.lock`) and
@@ -18,6 +18,9 @@ Adapted from Fermata's `SECURITY.md` (bilgin-kocak/fermata @ d7cc642) for the St
   - **Attestor.** TLSNotary at git rev `47aee45b` and Rust 1.95.0 (`apps/attestor/Cargo.lock`
     and `rust-toolchain.toml`).
   - **SDK.** `@stellar/stellar-sdk` 16.3.1 and the rest in `pnpm-lock.yaml`.
+  - **Gateway.** mppx 0.10.1, `@x402/*` 2.28.0, Hono 4, and Stellar's MPP SDK (`@stellar/mpp`)
+    pinned to commit `90394ec` of its unreleased main branch, because its npm release needs
+    stellar-sdk 15. All in `pnpm-lock.yaml`.
   - **Tools.** Stellar CLI 28.1.0, whose checksum CI checks, and the quickstart image, which CI
     pins by digest.
 
@@ -29,8 +32,19 @@ Adapted from Fermata's `SECURITY.md` (bilgin-kocak/fermata @ d7cc642) for the St
   environment variable if set. It reaches `fermata-verdict` and `fermata-attest` only through
   their environment, never as a command-line flag. The attestor holds no Stellar account: it reads
   the escrow by simulation.
-- **The notary key** (secp256k1) is read from `NOTARY_PRIVATE_KEY`. `scripts/attest-cases.sh`
-  generates one for each run and keeps it in memory; services pin only its hash.
+- **The notary key** (secp256k1) is read from `NOTARY_PRIVATE_KEY`. `scripts/attest-cases.sh` and
+  `scripts/gateway-cases.sh` generate one for each run and keep it in memory; services pin only its
+  hash.
+- **The gateway's keys** come only from its environment, never from its config file:
+  - `FERMATA_RELAYER_SECRET`: the account that submits holds, settlements and timeouts and pays
+    their fees.
+  - `GATEWAY_SECRET_KEY`: the HMAC key for MPP challenges and x402 call ids, at least 32 bytes.
+  - Optional: `FEE_PAYER_SECRET`, and OpenZeppelin's API keys `OZ_CHANNELS_API_KEY` and
+    `X402_FACILITATOR_API_KEY`.
+
+  `scripts/gateway-cases.sh` passes the relayer's and the agent's keys from the keystore into
+  those two processes' environments for the run, and generates the HMAC key for each run. It also
+  checks that the vendor's `Authorization` value never appears in a presentation.
 - **Keep the verifier key for verdicts only.** Never use it as an account signer. Verdict messages
   are 294 bytes and start with a fixed tag, while Stellar transaction and authorization
   signatures cover 32-byte hashes, so the two cannot be confused. A dedicated key keeps it that
@@ -61,6 +75,21 @@ Adapted from Fermata's `SECURITY.md` (bilgin-kocak/fermata @ d7cc642) for the St
   - The `Authorization` value never appears in a presentation, and hiding anything other than
     the three auth header values is rejected.
   - Its verdicts settle on the escrow only for the call they name.
+- **Holds and payments.** A sponsor accepts a signed hold only if:
+  - it authorizes exactly that hold (call, service, request, escrow, token, amount, agent), with
+    nothing deeper;
+  - it expires soon, its signature is the agent's for this network, and its source is the all-zero
+    account;
+  - its simulation emits only the hold's event and transfer.
+- **Replays.** The gateway refuses a replayed credential or payment, one reused on another
+  request, a stranger naming another agent's public call id, and x402 requirements it did not
+  issue for that request.
+- **The sweeper.** It refunds every hold that gets no verdict after the window, including after a
+  restart. It retries a failed settlement, and leaves alone a call that a request is still
+  handling.
+- **Reconciliation.** It flags a wrong amount, a second settlement, a hold missing from the index
+  and a balance that does not match the open holds. On a local network, every call in the M2
+  cases, and the escrow as a whole, reconcile from the indexed events.
 
 The suite was mutation-checked by hand during development: five injected bugs were each caught.
 They were fee rounding up, the window off by one, the fee read at settlement instead of at hold,
@@ -72,7 +101,7 @@ They were fee rounding up, the window off by one, the fee read at settlement ins
   that failed (the vendor is paid) or FAILED for one that succeeded (the agent is refunded). The
   contract cannot tell. A dishonest verdict is detectable by re-verifying its presentation
   offline; it is not impossible.
-- **The notary is run by the attestor's operator** in this milestone, so that operator could
+- **The notary is run by the attestor's operator** in these milestones, so that operator could
   produce a presentation for bytes the vendor never sent. An independent notary is the planned fix.
 - **The attestor's HTTP API has no authentication.** It is meant for a gateway on the same host,
   and listens on 127.0.0.1 by default. Anyone who can reach it can ask it to prove calls, and can
@@ -94,9 +123,31 @@ They were fee rounding up, the window off by one, the fee read at settlement ins
   transaction's diagnostic events.
 - **Events expire from RPC.**
   - RPC providers typically keep events for about 7 days, and events are not ledger state.
-  - Hold records stay in contract storage (archived, not deleted, when their TTL runs out). The
-    full history of releases and refunds needs an indexer or archived transaction metadata;
-    reconciliation from events is planned for Milestone 2.
+  - The gateway's indexer keeps its own copy from the moment it starts (or from the escrow's
+    deployment, if the RPC still has it). A gateway that is down for longer than the RPC's
+    retention loses those events. The indexer records the gap, and the escrow-wide balance check
+    is then skipped.
+- **The gateway's read API has no authentication.** It listens on 127.0.0.1 by default. Anyone who
+  can reach it can list every call, download every presentation, and so read every vendor
+  response.
+- **MPP replay protection is in memory** (mppx's store) and is forgotten when the gateway
+  restarts. A credential replayed after a restart can still never make an agent pay twice:
+  - the gateway checks that the hold is still open;
+  - the escrow refuses a second hold for the same call id.
+- **Sponsored holds cost the gateway fees.** Each one is a transaction it pays for (or OpenZeppelin
+  Channels does). A payer must lock real money in each hold, which bounds the cost. Still, the
+  only limit is admission control: no rate limit per agent.
+- **Unprotected options.** Stellar's MPP Charge and x402 `exact` pay the vendor directly. Nothing
+  is held or proved, and nothing is refunded. With `exact` through a hosted facilitator, that
+  facilitator settles the payment. Neither hosted OpenZeppelin service has been tried from this
+  repository yet.
+- **An unreleased dependency.** Stellar's MPP SDK is pinned to a commit of its main branch until a
+  release supports stellar-sdk 16.
+- **Development-only pieces.**
+  - `scripts/lib/tls-proxy.mjs` (HTTPS in front of a local network's RPC, with a certificate made
+    for the run) is for local networks only.
+  - A local network started with testnet's passphrase accepts signatures made for testnet. Use
+    keys made for it (`KEY_PREFIX`), never testnet keys that hold anything.
 - **State archival.** Holds, services and the contract instance are extended as described in
   [`architecture.md`](architecture.md). An archived entry is restored when touched (protocol 23
   and later), which costs rent but never loses funds.

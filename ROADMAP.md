@@ -1,8 +1,8 @@
 # Roadmap
 
-The milestones follow the Stellar Community Fund's tranche structure. Milestones 0 and 1 are
-this repository today; their testnet runs are pending. Everything after them is planned and not
-built yet. Each milestone ends with something a reviewer can run.
+The milestones follow the Stellar Community Fund's tranche structure. Milestones 0 and 1, and the
+gateway half of Milestone 2, are this repository today; their testnet runs are pending. Everything
+else is planned and not built yet. Each milestone ends with something a reviewer can run.
 
 ## M0 — The escrow on Stellar (done)
 
@@ -50,24 +50,36 @@ In M0 the verifier key signs verdicts directly; no TLSNotary proof is involved y
 Done when the three cases pass on testnet with real presentations and their offline
 re-verification matches the chain. Everything but the testnet run is in place.
 
-## M2 — Testnet product: the gateway on Stellar
+## M2 — Testnet product: the gateway on Stellar (the gateway done, except the testnet run)
 
-- **A `fermata` MPP method** next to Stellar's MPP Charge, so an agent's paid request is held in
-  escrow and settled on proof.
-- **An escrowed x402 scheme, `fermata`,** next to the `exact` scheme. OpenZeppelin's x402
-  facilitator accepts only `exact`, so the escrowed scheme's holds are submitted through
-  OpenZeppelin's Channels service (the Relayer plugin that pays the fees), and `exact` goes
-  through OpenZeppelin's facilitator.
-- **Dashboard and reconciliation from Soroban events.** The escrow's `held`, `released`,
-  `refunded` and `timed_out` events, joined with the Stellar Asset Contract's transfer events,
-  through an indexer, because RPC keeps events for only about 7 days.
-- **Lower proving cost.** Session escrow (hold once for N calls, settle in batches) and sampled
-  proving (prove a random subset the vendor cannot predict). Both need a new contract version and
-  change the guarantee, so their design comes after the gateway, for the owner's approval before
-  any code.
+- **Done: a `fermata` MPP method** next to Stellar's MPP Charge, so an agent's paid request is held
+  in escrow and settled on proof (`packages/sdk/src/mpp`, `apps/gateway`).
+  - The agent signs only the authorization of `hold`, and the gateway submits it and pays the fee.
+  - Or the agent submits the hold itself and sends its hash.
+- **Done: an escrowed x402 scheme, `fermata`,** next to the `exact` scheme
+  (`packages/sdk/src/x402`).
+  - OpenZeppelin's x402 facilitator accepts only `exact`, so the escrowed scheme's facilitator runs
+    in the gateway. It submits holds through OpenZeppelin's Channels service (the Relayer plugin
+    that pays the fees) when an API key is set, and from the gateway's relayer otherwise.
+  - `exact` goes through OpenZeppelin's facilitator when one is configured.
+  - Neither hosted service has been tried yet: the build environment cannot reach them.
+- **Done: dashboard and reconciliation from Soroban events.**
+  - The escrow's `held`, `released`, `refunded` and `timed_out` events, joined with the Stellar
+    Asset Contract's transfer events, through an indexer, because RPC keeps events for only about
+    7 days.
+  - Every call reconciles, and so does the escrow as a whole: per token, the balance against the
+    open holds and the chain.
+  - The dashboard is Fermata's, ported.
+- **The cases.** `scripts/gateway-cases.sh` pays a vendor through the gateway with both methods
+  (the three outcomes each, plus Stellar's MPP Charge and x402 `exact`) and reconciles every
+  outcome. It passes on a local network and in CI. **The testnet run is pending:** the build
+  environment cannot reach testnet, and the README has the commands.
+- **Next: lower proving cost.** Session escrow (hold once for N calls, settle in batches) and
+  sampled proving (prove a random subset the vendor cannot predict). Both need a new contract
+  version and change the guarantee. Their design goes to the owner for approval before any code.
 
 Done when an agent pays a vendor through the gateway on testnet with both methods, and every
-outcome reconciles from events.
+outcome reconciles from events. For that, everything but the testnet run is in place.
 
 The plan and the decisions behind it are in
 [`docs/PORTING_NOTES.md`](docs/PORTING_NOTES.md#10-milestone-2-plan-the-gateway-on-stellar),

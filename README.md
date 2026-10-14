@@ -28,8 +28,21 @@ This repository makes Stellar Fermata's primary home. It ports
   the paid call over MPC-TLS through a notary, checks the presentation against the hold and the
   service it reads from the escrow, evaluates the delivery predicate, and only then signs the
   verdict. Anyone can re-verify the presentation offline against the hashes on chain.
+- **Milestone 2: the gateway.** An agent pays for an API call through the gateway
+  (`apps/gateway`), with the `fermata` payment method for MPP or the `fermata` scheme for x402.
+  - **Either way the agent signs only the authorization of `hold`.** The gateway submits the hold
+    and pays its fee.
+  - **The gateway then does the rest.** It has the attestor prove the vendor's response, settles
+    the verdict, and refunds holds that got no verdict with `claim_timeout`.
+  - **Unprotected options.** Stellar's MPP Charge and x402 `exact` are offered next to them and
+    pay the vendor directly, with no escrow and no proof.
+  - **Reconciliation.** An indexer keeps the escrow's and the token's events, and every call
+    reconciles from them. A dashboard shows the calls.
 
-**In this milestone the notary is run by the same operator as the attestor** (the scripts start
+  Session escrow and sampled proving, the rest of Milestone 2, are designed next. They need the
+  owner's approval before any code.
+
+**In these milestones the notary is run by the same operator as the attestor** (the scripts start
 one with a key made for the run). An independent notary is the first trust-minimization step on
 the roadmap.
 
@@ -41,29 +54,34 @@ Vocabulary throughout: `hold → release(proof) → refund`.
 sequenceDiagram
   autonumber
   participant Ag as Agent
+  participant Gw as Gateway
   participant Es as Fermata escrow (Soroban)
   participant Tk as USDC (Stellar Asset Contract)
   participant At as Attestor (fermata-attest)
   participant No as Notary
   participant Ve as Vendor API
-  participant Rl as Relayer (anyone)
-  Ag->>Es: hold(agent, callId, serviceId, requestHash), authorized by the agent
+  Ag->>Gw: the API request, unpaid
+  Gw-->>Ag: 402 with the offers: MPP fermata, x402 fermata (and Charge and exact, unprotected, where offered)
+  Note over Ag: checks the escrow, the verifier, the price and the window against its allow-lists and limits
+  Ag->>Gw: the request again, with its signed authorization of hold(agent, callId, serviceId, requestHash)
+  Gw->>Es: hold, submitted and paid for by the gateway or by OpenZeppelin Channels
   Es->>Tk: transfer(agent to escrow, price)
   Note over Es: event held(callId, serviceId, agent)
-  Ag->>At: make the paid call (callId, URL, headers). From M2 the gateway does this.
+  Gw->>At: prove the call (callId, URL, headers)
   At->>Ve: the HTTPS request and response, over MPC-TLS with the notary
   No-->>At: signed attestation. The notary never sees plaintext.
   At->>Es: read get_hold, get_service and the ledger time (simulated, no account)
   Note over At: 7 binding checks, then the delivery predicate on the proved response
-  At->>Rl: Ed25519 verdict DELIVERED or FAILED for this network and escrow, and the presentation
-  Rl->>Es: settle(callId, verdict, signature)
+  At-->>Gw: Ed25519 verdict DELIVERED or FAILED for this network and escrow, and the presentation
+  Gw->>Es: settle(callId, verdict, signature). Anyone may submit it.
   alt DELIVERED
     Es->>Tk: transfer(escrow to vendor payout, price minus fee)
     Es->>Tk: transfer(escrow to treasury, fee)
   else FAILED
     Es->>Tk: transfer(escrow to agent, price)
   end
-  Note over Ag,Es: No verdict before the window closes (for example no response, so no transcript), then anyone calls claim_timeout and the agent is refunded
+  Gw-->>Ag: the proved response, with a receipt naming the call, its hold and its settlement
+  Note over Gw,Es: No verdict before the window closes (for example no response, so no transcript), then the gateway's sweeper calls claim_timeout (anyone can) and the agent is refunded
 ```
 
 How the parts map from Tempo:
@@ -79,6 +97,24 @@ How the parts map from Tempo:
 - **The attestor's reads.** It reads the hold and the service by simulating the escrow's views
   over Soroban RPC from an account that does not exist, so it needs no Stellar account; chain time
   is the latest ledger's close time.
+- **Paying through the gateway.** There are two escrowed ways to pay:
+  - **MPP.** Fermata's `fermata` method is ported to mppx 0.10.1. The agent either signs only the
+    authorization of `hold` and lets the gateway submit it (a sponsored hold, the default), or
+    submits `hold` itself and sends the transaction hash.
+  - **x402.** The scheme `fermata` is new. It follows the escrow flow of x402's `auth-capture`
+    draft: authorize is `hold`, capture or void is the verdict's `settle`, and reclaim is
+    `claim_timeout`. There is no partial capture and no refund after capture. Its payload follows
+    x402's `exact` scheme on Stellar.
+- **Who pays the fees.** A sponsored hold is built like the pull mode of Stellar's MPP Charge: the
+  agent signs only its authorization entry, with the all-zero account as the transaction's source.
+  - **The gateway checks before it pays.** The entry must authorize one `hold` for this call,
+    containing exactly one token transfer of the price into the escrow, and must expire within
+    minutes and carry a valid signature. The gateway then simulates the hold and checks its events.
+  - **Who submits.** With an OpenZeppelin API key, the gateway hands the hold to OpenZeppelin's
+    Channels service, which submits it from its own accounts.
+- **Reconciliation.** Each call reconciles from the escrow's events and the token's transfers in
+  the same transactions, which replaces filtering TIP-20 memos. RPC keeps events for about 7 days,
+  so the gateway's indexer copies them to disk.
 - **Every difference** from the Solidity contract, with its reason, is in
   [`docs/PORTING_NOTES.md`](docs/PORTING_NOTES.md).
 
@@ -89,11 +125,14 @@ How the parts map from Tempo:
 | Escrow: `register_service`, `hold`, `settle`, `claim_timeout`, fee and treasury administration, events | **Implemented and tested on Stellar** ([`contracts/escrow`](contracts/escrow), 62 tests) |
 | Stellar verdict: encoding, Ed25519 signer, strict verification, CLI, golden vectors | **Implemented and tested on Stellar** ([`crates/fermata-verdict`](crates/fermata-verdict), 28 tests; [`test-vectors/`](test-vectors)) |
 | TLSNotary attestor: proving, notary, 7 binding checks, predicates, HTTP API, offline re-verification | **Implemented and tested on Stellar** ([`apps/attestor`](apps/attestor): 14 unit tests and an integration test with real MPC-TLS sessions; its verdicts settle on the escrow in the contract tests) |
-| TypeScript SDK: typed escrow client, verdict encoding and signatures, registration hashes | **Implemented and tested on Stellar** ([`packages/sdk`](packages/sdk), 19 tests, plus a live parity test against a deployment) |
-| Deployment and the three canonical cases (`scripts/`) | **Implemented and tested on Stellar**: `demo-cases.sh` (script-signed verdicts, M0) and `attest-cases.sh` (real TLSNotary proofs, M1) each pass 3/3 on a local network (protocol 29), in CI too. The testnet run is pending; see [Live on testnet](#live-on-testnet). |
-| Gateway with the `fermata` MPP payment method, MCP server (`fermata-mcp`) | **Only in the Tempo version**. On Stellar: MPP and x402 planned in M2. |
-| Dashboard, reconciliation, vendor scores, self-serve onboarding | **Only in the Tempo version**. Planned in M2 (onboarding in M3). |
-| Session escrow, sampled proving | **Planned** (M2), in neither version yet |
+| TypeScript SDK: typed escrow client, verdict encoding and signatures, registration hashes, holds, the MPP method and the x402 scheme, indexer, reconciliation, scores | **Implemented and tested on Stellar** ([`packages/sdk`](packages/sdk): 48 tests, plus 15 live tests against a deployment) |
+| Deployment and the canonical cases (`scripts/`) | **Implemented and tested on Stellar**, on a local network (protocol 29) and in CI. The testnet run is pending; see [Live on testnet](#live-on-testnet). <br>• `demo-cases.sh` (M0, script-signed verdicts): 3/3 <br>• `attest-cases.sh` (M1, real TLSNotary proofs): 3/3 <br>• `gateway-cases.sh` (M2, paid through the gateway): 8 calls, 42 checks |
+| Gateway: the `fermata` MPP method and x402 scheme (escrowed), Stellar's MPP Charge and x402 `exact` (unprotected), the sweeper, the read API | **Implemented and tested on Stellar** ([`apps/gateway`](apps/gateway): 23 tests, and `gateway-cases.sh`) |
+| Holds submitted through OpenZeppelin's Channels service; `exact` through OpenZeppelin's x402 facilitator | **Implemented, not run against OpenZeppelin's hosted services**, which need testnet and an API key. The Channels client passes a live test against a stand-in that implements the documented API; `exact` is tested with a facilitator in the gateway's process. |
+| Indexer, reconciliation from events, vendor scores | **Implemented and tested on Stellar** (`packages/sdk`; in `gateway-cases.sh` every call, and the escrow as a whole, reconciles from the indexed events) |
+| Dashboard | **Ported** ([`apps/dashboard`](apps/dashboard)). It typechecks and builds in CI, and the gateway serves it. There are no browser tests. |
+| MCP server (`fermata-mcp`), self-serve onboarding | **Only in the Tempo version**. Onboarding is planned in M3. |
+| Session escrow, sampled proving | **Planned** (M2). Designed next, for the owner's approval before any code; in neither version yet. |
 | Mainnet, security audit, design partners | **Planned** (M3) |
 | Independent notary, vendor-chosen verifiers, N-of-M quorum, on-chain presentation verification | **Planned** (trust minimization) |
 
@@ -102,7 +141,7 @@ How the parts map from Tempo:
 **Not deployed yet.** The build environment that produced these milestones cannot reach Stellar
 testnet: its network policy refuses the RPC, Horizon and Friendbot hosts. So nothing here claims a
 testnet deployment, and [`deployments/testnet.json`](deployments/testnet.json) is a placeholder.
-All three scripts ran against a local Stellar network (stellar-core 29.0.0, RPC 29.0.1, protocol 29,
+All four scripts ran against a local Stellar network (stellar-core 29.0.0, RPC 29.0.1, protocol 29,
 testnet resource limits) instead, and the CI runs them there on every push.
 
 To deploy and run the cases on testnet, from a machine that reaches it:
@@ -112,18 +151,37 @@ git clone https://github.com/bilgin-kocak/fermata-stellar && cd fermata-stellar
 scripts/deploy-testnet.sh   # builds, creates fermata-* identities, deploys, registers the demo service,
                             # writes deployments/testnet.json and prints the agent's address
 # Circle's testnet USDC: request it for that address at https://faucet.circle.com (Stellar testnet);
-# the cases below use 7 calls at 0.01 USDC. The faucet is a web form with a captcha. Or skip it with
-# a self-issued test asset:
+# the cases below make 15 calls at 0.01 USDC, and refunds return most of it. The faucet is a web
+# form with a captcha. Or skip it with a self-issued test asset:
 #   TOKEN=test scripts/deploy-testnet.sh
 scripts/demo-cases.sh       # M0: release, verified-failure refund, timeout refund (script-signed verdicts)
 scripts/attest-cases.sh     # M1: the same three cases with real TLSNotary proofs, offline re-verification
                             # and a replay check; needs Node, and builds the attestor (a few minutes)
+corepack enable && pnpm install
+scripts/gateway-cases.sh    # M2: an agent pays through the gateway: the three outcomes with MPP and
+                            # again with x402, then Stellar's MPP Charge and x402 exact; every call is
+                            # checked against the chain and reconciled from events (8 calls; the
+                            # agent needs 0.08 USDC on hand)
 ```
 
+By default the gateway submits the agent's holds from the relayer's account, and settles x402
+`exact` with a facilitator in its own process. To use OpenZeppelin's hosted services instead, get
+an API key from the web form at <https://channels.openzeppelin.com/testnet/gen>. The same key
+serves the Channels service and the x402 facilitator:
+
+```sh
+read -rs OZ_KEY && export OZ_CHANNELS_API_KEY="$OZ_KEY" X402_FACILITATOR_API_KEY="$OZ_KEY"
+OZ_CHANNELS_URL=https://channels.openzeppelin.com/testnet \
+  X402_FACILITATOR_URL=https://channels.openzeppelin.com/x402/testnet scripts/gateway-cases.sh
+```
+
+These two services have not been tried from this repository yet: the build environment's
+network policy refuses `channels.openzeppelin.com` as well.
+
 This section then lists the contract id and the transaction links: a hold and a settlement or
-claim for each case. The vendors, the notary and the attestor run on the machine that runs
-`attest-cases.sh`; only the escrow is on testnet. Testnet is reset about once a quarter; the
-scripts redeploy from scratch.
+claim for each case. The vendors, the notary, the attestor and the gateway run on the machine
+that runs the scripts. Only the escrow, and OpenZeppelin's services when configured, are on
+testnet. Testnet is reset about once a quarter; the scripts redeploy from scratch.
 
 ## Quick start
 
@@ -133,8 +191,8 @@ Requirements:
   `apps/attestor/rust-toolchain.toml` pins 1.95.0, which TLSNotary needs.
 - The Stellar CLI, 25.2 or newer (tested with 28.1.0); `soroban-sdk` 29 builds contracts only
   through `stellar contract build`.
-- Node 22.12 or newer, with pnpm through corepack (`corepack enable`), for the SDK and the demo
-  vendor.
+- Node 22.12 or newer, with pnpm through corepack (`corepack enable`), for the SDK, the gateway,
+  the dashboard and the demo vendor.
 - `jq`, `openssl` and `curl` for the scripts.
 - Python 3 with `cryptography` for the independent vector check.
 
@@ -150,24 +208,51 @@ cargo test --release                              # unit tests; the first build 
 cargo test --release --test attest -- --ignored --nocapture   # real MPC-TLS sessions (node, openssl)
 cd ../..
 
-pnpm install && pnpm sdk:typecheck && pnpm sdk:test
+pnpm install && pnpm sdk:typecheck && pnpm sdk:test   # 48 tests; the live suites need a deployment
+pnpm gateway:typecheck && pnpm gateway:test           # 23 tests
+pnpm dashboard:build                                  # apps/dashboard/dist, served by the gateway
 ```
 
-Against a local Stellar network (Docker):
+Against a local Stellar network (Docker). This one runs with testnet's passphrase, as CI's does,
+because Stellar's MPP Charge and x402 `exact` know only testnet's and mainnet's passphrases.
+`KEY_PREFIX` keeps its keys apart from any testnet identities in your keystore:
 
 ```sh
-docker run -d --name stellar --network host stellar/quickstart:latest \
-  --local --enable core,rpc,horizon --protocol-version 29   # the image defaults to protocol 28
-NETWORK=local scripts/deploy-testnet.sh           # uses a self-issued FERMATATEST asset
-NETWORK=local scripts/demo-cases.sh
-NETWORK=local scripts/attest-cases.sh
-FERMATA_DEPLOYMENT=deployments/local.json pnpm sdk:test   # also checks the deployment's views
+export NETWORK=local LOCAL_PASSPHRASE="Test SDF Network ; September 2015" KEY_PREFIX=fermata-local
+docker run -d --name stellar --network host -e NETWORK_PASSPHRASE="$LOCAL_PASSPHRASE" \
+  stellar/quickstart:latest --local --enable core,rpc,horizon --protocol-version 29
+scripts/deploy-testnet.sh                         # uses a self-issued FERMATATEST asset
+scripts/demo-cases.sh
+scripts/attest-cases.sh
+FERMATA_DEPLOYMENT=deployments/local.json \
+  FERMATA_AGENT_SECRET="$(stellar keys secret fermata-local-agent)" \
+  FERMATA_RELAYER_SECRET="$(stellar keys secret fermata-local-relayer)" pnpm sdk:test   # all 63
+scripts/gateway-cases.sh
 ```
 
-That `docker run` command is the one these scripts were tested with (on Linux). Where host
-networking is unavailable, map the port instead (`-p 8000:8000`).
-`stellar container start local --protocol-version 29` should start the same network; it was not
-tested here.
+That `docker run` command is the one these scripts were tested with (on Linux). The image
+defaults to protocol 28, hence `--protocol-version 29`. Where host networking is unavailable, map
+the ports instead (`-p 8000:8000`). Without `-e NETWORK_PASSPHRASE` and `LOCAL_PASSPHRASE` the
+network uses the image's standalone passphrase. Everything still runs then, except
+`gateway-cases.sh`'s two unprotected calls, which it skips.
+`stellar container start local --protocol-version 29` should start a network with the standalone
+passphrase; it was not tested here.
+
+**Running the gateway yourself.** `scripts/gateway-cases.sh` starts the whole stack (vendors,
+notary, attestor, gateway) and is the reference for doing it by hand. In outline:
+
+1. Copy [`apps/gateway/gateway.config.example.json`](apps/gateway/gateway.config.example.json) to
+   `apps/gateway/gateway.config.json` and fill in the escrow, the services and the attestor's URL.
+2. Run it:
+
+   ```sh
+   FERMATA_RELAYER_SECRET="$(stellar keys secret fermata-relayer)" \
+     GATEWAY_SECRET_KEY="$(openssl rand -hex 32)" pnpm gateway:start
+   ```
+
+The dashboard is then at `http://127.0.0.1:4300/dashboard/`. The other settings are listed at
+the top of [`apps/gateway/src/main.ts`](apps/gateway/src/main.ts) and in
+[`apps/gateway/src/config.ts`](apps/gateway/src/config.ts).
 
 Keys live only in the Stellar CLI keystore (`stellar keys`). [`.env.example`](.env.example) lists
 the settings the scripts read.
@@ -197,8 +282,16 @@ FERMATA_VERIFIER_SECRET="$(stellar keys secret fermata-verifier)" \
 - **What it cannot check** is whether a verdict is true. The attestor signs only after verifying
   a TLSNotary presentation that anyone can re-verify offline (`fermata-attest verify --offline`,
   against the hashes the escrow stores). A dishonest verdict is therefore detectable, though not
-  prevented. In this milestone the notary and the attestor have the same operator, so a dishonest
-  operator could also forge a transcript; an independent notary removes that.
+  prevented. In these milestones the notary and the attestor have the same operator, so a
+  dishonest operator could also forge a transcript; an independent notary removes that.
+- **The gateway** runs the attestor, the notary and the relayer in these milestones. It cannot
+  move held money or change a hold's terms: the agent's authorization fixes the escrow, the call,
+  the service, the request and the amount, and only a verdict or the timeout ends a hold.
+  - **What it can do:** refuse to serve, or let a hold run out its window (the agent is then
+    refunded). Because it also runs the notary, a dishonest operator could forge a transcript and
+    get a verdict for it. Offline re-verification cannot tell; an independent notary is the fix.
+  - **The unprotected options** (Stellar's MPP Charge and x402 `exact`) pay the vendor directly,
+    with no escrow, no proof and no refund.
 - **Closing that gap.** Vendor-chosen verifiers, an N-of-M quorum and on-chain verification are on
   the roadmap. Details: [`docs/trust-model.md`](docs/trust-model.md) and
   [`docs/security.md`](docs/security.md).
@@ -258,10 +351,15 @@ crates/fermata-verdict/    Stellar verdict encoding + Ed25519 signer: library an
 apps/attestor/             fermata-attest: TLSNotary prover, notary and verifier, signing for Stellar
                            (its own workspace, Rust 1.95.0)
 apps/vendor/               the demo vendor from Fermata: a TLS 1.2 quote API with failure modes
-packages/sdk/              the TypeScript SDK: generated escrow client, verdict, hashes
+apps/gateway/              the gateway: MPP and x402 offers, holds, proofs through the attestor,
+                           settlement, the timeout sweeper, the indexer and the read API (Hono)
+apps/dashboard/            Fermata's dashboard (React, Vite), served by the gateway at /dashboard
+packages/sdk/              the TypeScript SDK: generated escrow client, verdict, hashes, holds, the
+                           fermata MPP method and x402 scheme, indexer, reconciliation, scores
 test-vectors/              golden vectors and the attestor's real verdicts, asserted by the
                            contract, the crates and the SDK, plus an independent Python/OpenSSL check
-scripts/                   deploy-testnet.sh, demo-cases.sh, attest-cases.sh (and lib.sh)
+scripts/                   deploy-testnet.sh, demo-cases.sh, attest-cases.sh, gateway-cases.sh (and
+                           lib.sh, lib/tls-proxy.mjs)
 predicates/                the demo service's delivery predicate (from Fermata)
 deployments/testnet.json   the testnet deployment (a placeholder until the script runs there)
 docs/                      PORTING_NOTES.md, architecture.md, trust-model.md, security.md

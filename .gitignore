@@ -28,3 +28,6 @@ storage/
 
 # Deployments to a local quickstart network are throwaway
 deployments/local.json
+
+# A local gateway configuration (the example stays tracked)
+apps/gateway/gateway.config.json
