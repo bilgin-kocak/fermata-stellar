@@ -10,11 +10,16 @@
 #          ok: verdict DELIVERED → released; 500: FAILED → refunded; hang: no proof → the gateway's
 #          sweeper refunds the agent with claim_timeout after the window
 #   C1-C2  Stellar's MPP Charge and x402 `exact` → ok: unprotected, the vendor is paid directly
+#   S1-S3  with a session contract in the deployment: the `fermata` method's `session` intent, one
+#          session of 4 calls on ok: a quote (DELIVERED), an unknown symbol (the vendor's 404,
+#          FAILED) and another quote; the gateway settles calls 1-2 at once (B = 2), call 3 after
+#          the session's 60 s of calls, and closes it after its deadline, refunding the 4th call
 #
 # Then each escrowed call is checked against the gateway's record, reconciled from the indexed
 # events (the escrow's and the token's), and its proof re-verified offline against the chain; the
-# agent's and the vendor's token balances must move by exactly what the outcomes say, and the escrow
-# must reconcile as a whole.
+# session is checked against the gateway's record and reconciled from the session contract's events;
+# the agent's and the vendor's token balances must move by exactly what the outcomes say, and the
+# escrow and the session contract must reconcile as a whole.
 #
 #   NETWORK=local LOCAL_PASSPHRASE="Test SDF Network ; September 2015" scripts/gateway-cases.sh
 #   scripts/gateway-cases.sh                  # testnet (see the README)
@@ -48,6 +53,8 @@ WINDOW="$(d .service.settlement_window)"
 VENDOR="$(d .service.owner)"
 VERIFIER_KEY="$(d .service.verifier)"
 START_LEDGER="$(d '.escrow.deploy_ledger // empty')"
+SESSION="$(d '.session.contract_id // empty')"
+SESSION_START="$(d '.session.deploy_ledger // empty')"
 AGENT="$(address_of agent)"
 [ "$AGENT" = "$(d .accounts.agent)" ] || die "the keystore's $(key agent) is not the deployment's agent"
 [ "$VENDOR" = "$(address_of vendor)" ] || die "the keystore's $(key vendor) is not the deployment's vendor"
@@ -59,10 +66,12 @@ case "$PASSPHRASE" in
 *) die "no CAIP-2 network id for \"$PASSPHRASE\"" ;;
 esac
 
-NEEDED=$((8 * PRICE))
+CALLS=8
+[ -z "$SESSION" ] || CALLS=12 # and a session's deposit of 4 calls
+NEEDED=$((CALLS * PRICE))
 HAVE="$(balance "$AGENT")"
 [ "$HAVE" -ge "$NEEDED" ] ||
-  die "the agent holds $HAVE of the $NEEDED base units needed (8 calls); fund $AGENT (USDC: $USDC_FAUCET)"
+  die "the agent holds $HAVE of the $NEEDED base units needed ($CALLS calls); fund $AGENT (USDC: $USDC_FAUCET)"
 
 OK_PORT="${OK_PORT:-8743}"
 E500_PORT="${E500_PORT:-8744}"
@@ -125,6 +134,7 @@ NOTARY_KEY_HASH="$(jq -r .notaryKeyHash "$LOGS/notary.json")"
 
 attestor_args=(--network "$NETWORK" --network-passphrase "$PASSPHRASE" --escrow "$ESCROW")
 attestor_args+=(--rpc "$RPC")
+if [ -n "$SESSION" ]; then attestor_args+=(--session-contract "$SESSION" --sessions "$LOGS/attestor-sessions"); fi
 FERMATA_VERIFIER_SECRET="$(verifier_secret)" "$ATTEST" serve "${attestor_args[@]}" \
   --listen "127.0.0.1:$ATTESTOR_PORT" --notary "127.0.0.1:$NOTARY_PORT" --ca "$CA" \
   --predicate "$ROOT/predicates" --storage "$LOGS/presentations" --attempt-timeout-secs 10 \
@@ -176,6 +186,7 @@ SECRET="Bearer gw-$(openssl rand -hex 12)"
 jq -n --arg network "$CAIP2" --arg passphrase "$PASSPHRASE" --arg rpc "$GW_RPC" --arg escrow "$ESCROW" \
   --arg attestor "$ATTESTOR" --arg logs "$LOGS" --argjson port "$GATEWAY_PORT" \
   --arg start "$START_LEDGER" --arg fallback "$FALLBACK" --arg vendor "$VENDOR" \
+  --arg session "$SESSION" --arg session_start "$SESSION_START" \
   --arg ok "$SID_OK" --arg e500 "$SID_500" --arg hang "$SID_HANG" \
   --arg ok_port "$OK_PORT" --arg e500_port "$E500_PORT" --arg hang_port "$HANG_PORT" \
   'def svc($id; $port): {serviceId: $id, upstream: "https://vendor.fermata.test:\($port)",
@@ -188,7 +199,12 @@ jq -n --arg network "$CAIP2" --arg passphrase "$PASSPHRASE" --arg rpc "$GW_RPC" 
       (svc($ok; $ok_port) + (if $fallback == "yes" then {unprotected: {recipient: $vendor}} else {} end)),
       svc($e500; $e500_port), svc($hang; $hang_port)
     ]}
-   + (if $start != "" then {startLedger: ($start | tonumber)} else {} end)' >"$LOGS/gateway.config.json"
+   + (if $start != "" then {startLedger: ($start | tonumber)} else {} end)
+   + (if $session != "" then {sessionContract: $session,
+        sessions: ({batchSize: 2, maxCalls: 10, maxDurationSeconds: 600,
+                    storageDir: "\($logs)/sessions", indexDir: "\($logs)/session-index"}
+                   + (if $session_start != "" then {startLedger: ($session_start | tonumber)} else {} end))}
+      else {} end)' >"$LOGS/gateway.config.json"
 
 log "starting the gateway on $GATEWAY"
 resolve="vendor.fermata.test:$OK_PORT=127.0.0.1:$OK_PORT,vendor.fermata.test:$E500_PORT=127.0.0.1:$E500_PORT"
@@ -209,25 +225,27 @@ set +e
 (cd "$GW" && GATEWAY_URL="$GATEWAY" FERMATA_DEPLOYMENT="$DEPLOYMENT" STELLAR_RPC_URL="$GW_RPC" \
   STELLAR_NETWORK="$CAIP2" FERMATA_AGENT_SECRET="$(stellar keys secret "$(key agent)")" \
   SERVICES="$(jq -nc --arg ok "$SID_OK" --arg e500 "$SID_500" --arg hang "$SID_HANG" '{ok: $ok, e500: $e500, hang: $hang}')" \
-  TARGET="$TARGET" WINDOW="$WINDOW" UNPROTECTED="$FALLBACK" "$TSX" scripts/agent.ts >"$REPORT")
+  TARGET="$TARGET" WINDOW="$WINDOW" UNPROTECTED="$FALLBACK" SESSIONS="$([ -n "$SESSION" ] && echo yes || echo no)" \
+  "$TSX" scripts/agent.ts >"$REPORT")
 status=$?
 set -e
 [ -s "$REPORT" ] || die "the agent wrote no report (see ${LOGS#"$ROOT"/}/gateway.log)"
 if [ "$FALLBACK" = no ]; then log "C1-C2 skipped: Stellar's MPP Charge and x402 exact need testnet's or mainnet's passphrase"; fi
+if [ -z "$SESSION" ]; then log "S1-S3 skipped: the deployment has no session contract (run scripts/deploy-testnet.sh again)"; fi
 
 if grep -qF "${SECRET#Bearer }" "$LOGS"/presentations/*.tlsn 2>/dev/null; then
   log "FAIL  the upstream Authorization value appears in a presentation"
   status=1
 fi
 
-printf '\n%-4s %-25s %-6s %-5s %-17s %s\n' "case" "paid with" "to" "HTTP" "outcome" "call"
-jq -r '.cases[] | [.id, .pay, .service, (.http // "-" | tostring), (.outcome // "unprotected"), (.callId // "-")] | @tsv' "$REPORT" |
+printf '\n%-4s %-25s %-6s %-5s %-17s %s\n' "case" "paid with" "to" "HTTP" "outcome" "call (or session #n)"
+jq -r '.cases[] | [.id, .pay, .service, (.http // "-" | tostring), (.outcome // "unprotected"), (.callId // (if .sessionId then "\(.sessionId[0:16])… #\(.n)" else "-" end))] | @tsv' "$REPORT" |
   while IFS=$'\t' read -r id pay svc http outcome call; do
     printf '%-4s %-25s %-6s %-5s %-17s %s\n' "$id" "$pay" "$svc" "$http" "$outcome" "$call"
   done
 printf '\nreport %s\n' "${REPORT#"$ROOT"/}"
 if [ "$status" -eq 0 ]; then
-  printf '%s checks PASS\n' "$(jq '[.cases[].checks[]] + .balanceChecks + [.escrowCheck] | length' "$REPORT")"
+  printf '%s checks PASS\n' "$(jq '[.cases[].checks[]] + .sessionChecks + .balanceChecks + [.escrowCheck] | length' "$REPORT")"
 else
   printf 'FAIL: %s check(s) failed (see the report and %s)\n' "$(jq .failures "$REPORT")" "${LOGS#"$ROOT"/}"
   exit 1
