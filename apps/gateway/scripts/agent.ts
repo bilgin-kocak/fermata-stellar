@@ -7,7 +7,9 @@
 // (github.com/bilgin-kocak/fermata, MIT): the same three outcomes, here paid with MPP and with x402.
 //
 // Environment: GATEWAY_URL, FERMATA_DEPLOYMENT (deployment JSON), STELLAR_RPC_URL, STELLAR_NETWORK
-// (CAIP-2), FERMATA_AGENT_SECRET, SERVICES ('{"ok":…,"e500":…,"hang":…}'), TARGET, WINDOW (seconds).
+// (CAIP-2), FERMATA_AGENT_SECRET, SERVICES ('{"ok":…,"e500":…,"hang":…}'), TARGET, WINDOW (seconds),
+// UNPROTECTED (yes when the gateway offers Stellar's MPP Charge and x402 `exact`: they know only
+// testnet's and mainnet's passphrases, so on other networks C1-C2 are left out).
 import { readFileSync } from 'node:fs'
 import { charge as stellarCharge } from '@stellar/mpp/charge/client'
 import { Keypair } from '@stellar/stellar-sdk'
@@ -36,6 +38,7 @@ const services = JSON.parse(env('SERVICES')) as { ok: string; e500: string; hang
 const target = env('TARGET')
 const window = Number(env('WINDOW'))
 const verifier: string = d.service.verifier
+const unprotectedOffered = env('UNPROTECTED') === 'yes'
 const log = (m: string) => process.stderr.write(`${m}\n`)
 
 const fermataMpp = (mode: 'sponsored' | 'direct') =>
@@ -43,15 +46,17 @@ const fermataMpp = (mode: 'sponsored' | 'direct') =>
     methods: [fermata({ keypair, rpcUrl, network, networkPassphrase: passphrase, trustedVerifiers: [verifier], escrows: [escrow], mode })],
     polyfill: false,
   })
-const chargeMpp = Mppx.create({ methods: [stellarCharge({ keypair, rpcUrl })], polyfill: false })
+// Built only when used: both refuse a network they do not know.
+const chargeMpp = () => Mppx.create({ methods: [stellarCharge({ keypair, rpcUrl })], polyfill: false })
 const fermataX402 = wrapFetchWithPaymentFromConfig(fetch, {
   schemes: [{ network, client: new FermataX402Client({ keypair, rpcUrl, networkPassphrase: passphrase, trustedVerifiers: [verifier], escrows: [escrow] }) }],
   spendControls: { allowedAssets: true },
 })
-const exactX402 = wrapFetchWithPaymentFromConfig(fetch, {
-  schemes: [{ network, client: new ExactStellarScheme(createEd25519Signer(keypair.secret(), network), { url: rpcUrl }) }],
-  spendControls: { allowedAssets: true },
-})
+const exactX402 = () =>
+  wrapFetchWithPaymentFromConfig(fetch, {
+    schemes: [{ network, client: new ExactStellarScheme(createEd25519Signer(keypair.secret(), network), { url: rpcUrl }) }],
+    spendControls: { allowedAssets: true },
+  })
 
 type Check = { name: string; ok: boolean; detail?: string }
 type Case = {
@@ -67,16 +72,18 @@ type Case = {
   checks: Check[]
 }
 
-const cases: Case[] = [
-  { id: 'A1', pay: 'MPP fermata (sponsored)', service: 'ok', expect: { http: 200, outcome: 'DELIVERED', final: 'released' }, checks: [] },
-  { id: 'A2', pay: 'MPP fermata (direct)', service: 'e500', expect: { http: 500, outcome: 'FAILED', final: 'refunded' }, checks: [] },
-  { id: 'A3', pay: 'MPP fermata (sponsored)', service: 'hang', expect: { http: 504, outcome: 'AWAITING_TIMEOUT', final: 'timed-out' }, checks: [] },
-  { id: 'B1', pay: 'x402 fermata', service: 'ok', expect: { http: 200, outcome: 'DELIVERED', final: 'released' }, checks: [] },
-  { id: 'B2', pay: 'x402 fermata', service: 'e500', expect: { http: 500, outcome: 'FAILED', final: 'refunded' }, checks: [] },
-  { id: 'B3', pay: 'x402 fermata', service: 'hang', expect: { http: 504, outcome: 'AWAITING_TIMEOUT', final: 'timed-out' }, checks: [] },
-  { id: 'C1', pay: 'MPP stellar charge', service: 'ok', expect: { http: 200 }, checks: [] },
-  { id: 'C2', pay: 'x402 exact', service: 'ok', expect: { http: 200 }, checks: [] },
-]
+const cases: Case[] = (
+  [
+    { id: 'A1', pay: 'MPP fermata (sponsored)', service: 'ok', expect: { http: 200, outcome: 'DELIVERED', final: 'released' }, checks: [] },
+    { id: 'A2', pay: 'MPP fermata (direct)', service: 'e500', expect: { http: 500, outcome: 'FAILED', final: 'refunded' }, checks: [] },
+    { id: 'A3', pay: 'MPP fermata (sponsored)', service: 'hang', expect: { http: 504, outcome: 'AWAITING_TIMEOUT', final: 'timed-out' }, checks: [] },
+    { id: 'B1', pay: 'x402 fermata', service: 'ok', expect: { http: 200, outcome: 'DELIVERED', final: 'released' }, checks: [] },
+    { id: 'B2', pay: 'x402 fermata', service: 'e500', expect: { http: 500, outcome: 'FAILED', final: 'refunded' }, checks: [] },
+    { id: 'B3', pay: 'x402 fermata', service: 'hang', expect: { http: 504, outcome: 'AWAITING_TIMEOUT', final: 'timed-out' }, checks: [] },
+    { id: 'C1', pay: 'MPP stellar charge', service: 'ok', expect: { http: 200 }, checks: [] },
+    { id: 'C2', pay: 'x402 exact', service: 'ok', expect: { http: 200 }, checks: [] },
+  ] satisfies Case[]
+).filter((c) => unprotectedOffered || c.expect.final)
 
 const check = (c: Case, name: string, ok: boolean, detail?: string) => {
   c.checks.push({ name, ok, ...(ok || !detail ? {} : { detail }) })
@@ -93,9 +100,9 @@ async function pay(c: Case) {
   const res =
     c.pay === 'MPP fermata (sponsored)' ? await fermataMpp('sponsored').fetch(url, init)
     : c.pay === 'MPP fermata (direct)' ? await fermataMpp('direct').fetch(url, init)
-    : c.pay === 'MPP stellar charge' ? await chargeMpp.fetch(url, init)
+    : c.pay === 'MPP stellar charge' ? await chargeMpp().fetch(url, init)
     : c.pay === 'x402 fermata' ? await fermataX402(url, init)
-    : await exactX402(url, init)
+    : await exactX402()(url, init)
   c.http = res.status
   await res.arrayBuffer()
   check(c, `HTTP ${c.expect.http}`, res.status === c.expect.http, `got ${res.status}`)

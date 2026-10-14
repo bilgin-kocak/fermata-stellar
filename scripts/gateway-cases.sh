@@ -209,7 +209,7 @@ set +e
 (cd "$GW" && GATEWAY_URL="$GATEWAY" FERMATA_DEPLOYMENT="$DEPLOYMENT" STELLAR_RPC_URL="$GW_RPC" \
   STELLAR_NETWORK="$CAIP2" FERMATA_AGENT_SECRET="$(stellar keys secret "$(key agent)")" \
   SERVICES="$(jq -nc --arg ok "$SID_OK" --arg e500 "$SID_500" --arg hang "$SID_HANG" '{ok: $ok, e500: $e500, hang: $hang}')" \
-  TARGET="$TARGET" WINDOW="$WINDOW" "$TSX" scripts/agent.ts >"$REPORT")
+  TARGET="$TARGET" WINDOW="$WINDOW" UNPROTECTED="$FALLBACK" "$TSX" scripts/agent.ts >"$REPORT")
 status=$?
 set -e
 [ -s "$REPORT" ] || die "the agent wrote no report (see ${LOGS#"$ROOT"/}/gateway.log)"
