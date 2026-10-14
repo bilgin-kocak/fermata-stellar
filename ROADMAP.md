@@ -54,16 +54,24 @@ re-verification matches the chain. Everything but the testnet run is in place.
 
 - **A `fermata` MPP method** next to Stellar's MPP Charge, so an agent's paid request is held in
   escrow and settled on proof.
-- **An escrowed x402 scheme** next to the `exact` scheme, settled through the OpenZeppelin Relayer
-  facilitator.
+- **An escrowed x402 scheme, `fermata`,** next to the `exact` scheme. OpenZeppelin's x402
+  facilitator accepts only `exact`, so the escrowed scheme's holds are submitted through
+  OpenZeppelin's Channels service (the Relayer plugin that pays the fees), and `exact` goes
+  through OpenZeppelin's facilitator.
 - **Dashboard and reconciliation from Soroban events.** The escrow's `held`, `released`,
   `refunded` and `timed_out` events, joined with the Stellar Asset Contract's transfer events,
   through an indexer, because RPC keeps events for only about 7 days.
 - **Lower proving cost.** Session escrow (hold once for N calls, settle in batches) and sampled
-  proving (prove a random subset the vendor cannot predict).
+  proving (prove a random subset the vendor cannot predict). Both need a new contract version and
+  change the guarantee, so their design comes after the gateway, for the owner's approval before
+  any code.
 
 Done when an agent pays a vendor through the gateway on testnet with both methods, and every
 outcome reconciles from events.
+
+The plan and the decisions behind it are in
+[`docs/PORTING_NOTES.md`](docs/PORTING_NOTES.md#10-milestone-2-plan-the-gateway-on-stellar),
+section 10.
 
 ## M3 — Mainnet and UX
 

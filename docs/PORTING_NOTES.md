@@ -7,7 +7,8 @@ replaced or deferred, and why. Section 4 lists every intentional difference from
 It was written in Milestone 0, step 1, before any Stellar code. It was updated at the end of the
 milestone with the decisions taken (section 7) and what the implementation showed. Section 9 is
 Milestone 1 (the attestor and the TypeScript SDK): the plan written before its code, and what the
-implementation showed.
+implementation showed. Section 10 is the plan for Milestone 2 (the gateway, its payment methods and
+reconciliation from events), with the decisions the owner took before its code.
 
 ## Sources
 
@@ -443,3 +444,72 @@ Written at the end of the milestone.
 - **Tests ported from Fermata's `tests/attest.rs`.** `attestor_end_to_end`, `soak` and
   `real_vendor_npm`; the last two stay ignored. Fermata's two ABI unit tests (selector and word
   decoding) are replaced by five XDR tests.
+
+## 10. Milestone 2 plan: the gateway on Stellar
+
+Written 2026-10-14, before any Milestone 2 code. The decisions at the end were taken by the
+repository owner before the code was written.
+
+### Facts checked for M2
+
+| Fact | Value | Source |
+|---|---|---|
+| Fermata's gateway | `apps/gateway`: Hono 4.13.8, `@hono/node-server` 2.1.1, mppx 0.11.0, undici. The `fermata` method is `packages/sdk/src/method.ts`, `server.ts` and `client.ts`; scores, log scanning and `eventually` sit next to them. `apps/dashboard` is React 19 and Vite 7, about 1,700 lines, and reads only the gateway's API. | Fermata @ `d7cc642` |
+| mppx | The current release is 0.13.4 (2026-10-08). The type definitions Fermata's code uses (`Method`, `Store`, `Challenge`, `Credential`, `Receipt`, `Errors`, `mppx/server`, `mppx/client`, `mppx/hono`, discovery) are identical in 0.10.1 and 0.11.0. | npm; package contents compared |
+| Stellar's MPP payment method | `@stellar/mpp` 0.7.1 (npm, 2026-07-02) declares the peers `mppx ^0.6.29` and `@stellar/stellar-sdk ^15.1.0`; this repository's generated client needs stellar-sdk 16. Its `main` branch @ `90394ec` (2026-10-13, unreleased) declares `mppx ^0.10.1` and `@stellar/stellar-sdk ^16.3.0`. Pinned by commit, pnpm installs and builds it next to stellar-sdk 16.3.1 and mppx 0.10.1 with no peer warning. Charge has a pull mode (the client signs Soroban auth entries; the server submits and may pay the fee) and push modes (the client submits and sends the hash). | npm; `stellar/stellar-mpp-sdk` `CHANGELOG.md` and `package.json`; a scratch install |
+| x402 on Stellar | `@x402/core`, `@x402/stellar` and `@x402/hono` 2.28.0 (2026-09-29); `@x402/stellar` depends on `@stellar/stellar-sdk ^16.3.0`. Stellar has only the `exact` scheme: the client signs the auth entries of a SEP-41 `transfer`, and the facilitator rebuilds the transaction, pays the fee and submits it. Schemes are pluggable through client, server and facilitator interfaces in `@x402/core`. | npm; `x402-foundation/x402` @ `e95b066` `specs/schemes/exact/scheme_exact_stellar.md`; `@x402/core` types |
+| An escrow scheme in x402 | `auth-capture` (draft v1.1, 2026-08-18) has an `escrow` flow: `authorize` holds the funds before the resource runs, then `capture` or `void`, and the client can `reclaim` after a capture deadline. Only an EVM binding exists. The scheme also has partial capture and `refund` after capture, which Fermata's escrow does not have. | `specs/schemes/auth-capture/scheme_auth_capture.md` |
+| OpenZeppelin's x402 facilitator | The hosted facilitator (`channels.openzeppelin.com/x402/testnet`, API key from a web form) is the Relayer plugin `@openzeppelin/relayer-plugin-x402-facilitator` 0.5.0. It accepts only `exact` (`schemes = ["exact"]`, and `verify` rejects any other scheme) and is AGPL-3.0, like the Relayer itself. | `OpenZeppelin/relayer-plugin-x402-facilitator` @ `7583ebc` `src/types.ts`, `src/stellar/verify.ts`; `OpenZeppelin/openzeppelin-relayer` @ `6646ed9` `LICENSE` |
+| OpenZeppelin's Channels service | `@openzeppelin/relayer-plugin-channels` 0.21.0 (MIT) submits any Soroban invocation given as `func` plus signed `auth` entries, through channel accounts, with a fee bump paid by its fund account. It is hosted at `channels.openzeppelin.com/testnet` (API key from a web form) or runs in a self-hosted Relayer. | `OpenZeppelin/relayer-plugin-channels` @ `c7cf073`, README "Submit with Function and Auth" |
+| Networks in those libraries | `@stellar/mpp` and `@x402/stellar` know only the testnet and mainnet passphrases; their RPC URLs can be changed. The quickstart image reads `NETWORK_PASSPHRASE` from the environment in `--local` mode, and a local network started with the testnet passphrase reported it from `getNetwork`. | `@stellar/mpp` `sdk/src/constants.ts`; `@x402/stellar` 2.28.0; quickstart `/start` line 252; a local run |
+| Events | Stellar RPC keeps transactions and events for `history-retention-window` = 120,960 ledgers (about 7 days) by default. `getEvents` returns 100 events by default and at most 10,000 per call (`max-events-limit`). Providers choose their own values. Older history needs a Galexie data lake, Hubble (BigQuery) or a third-party indexer (Mercury, SubQuery, Goldsky). | `stellar/stellar-rpc` @ `40277d1` `cmd/stellar-rpc/internal/config/options.go`; SDF skill `data/SKILL.md` |
+| Session escrow, sampled proving | Not built in Fermata. Its README lists them under "The production shape, none of it built yet", and notes that sampling changes the guarantee: an unproved call cannot be proved later. | Fermata `README.md`, "Economics" |
+
+### Components
+
+| Fermata | Decision | On Stellar |
+|---|---|---|
+| `packages/sdk` `method.ts`, `server.ts`, `client.ts` (the `fermata` method for mppx) | adapt | **Kept:** the server mints the call id inside an HMAC-bound challenge; the client checks the escrow, the verifier, the price and the window against its allow-lists before it holds; the server checks the hold and claims the call id once. **Changed:** `chainId` becomes the CAIP-2 `network`. As in Stellar's Charge, there are two credential types: `transaction` (the agent signs the auth entries of `hold`, and the gateway submits it and pays the fee) and `hash` (the agent submits `hold` itself and sends the transaction hash). The server checks the `held` event, the hold and the deadline. |
+| (none) | new | **An escrowed x402 scheme**, `fermata` (decisions 2 and 3), with client, server and facilitator parts on `@x402/core`. The payload is a transaction with one `hold` invocation and its signed auth entries. The facilitator applies the checks of `exact` on Stellar to `hold`: one invocation of the trusted escrow with the requirement's service, call id and request hash; one sub-invocation, the token transfer of the price to the escrow; an expiry bound; the facilitator absent from every auth entry; a simulation that succeeds with only that balance change. Settling submits the hold. Capture and void are the verdict's `settle`, and reclaim is `claim_timeout`. |
+| `apps/gateway` | adapt | **Kept:** the paid route `/s/:serviceId/*` (402, hold, fulfil through the attestor, verdict, `settle`, response with a receipt), the call store, the sweeper (`claim_timeout` after the window), admission control and the read API (`/services`, `/scores`, `/calls`, `/proofs`, `/ca.pem`, `/predicates/:hash`, `/info`, `/events`, `/reconcile/:callId`, `POST /proofs/:callId/verify`, discovery). **Changed:** one 402 offers four ways to pay, the MPP `fermata` method and Stellar's Charge, and the x402 escrowed scheme and `exact`. Charge and `exact` pay the vendor directly, without escrow or proof, like Fermata's `tempo` fallback; their receipts say `unprotected`. `GatewayChain` is reimplemented on Soroban RPC, with the relayer key from the keystore. |
+| `scores.ts`, `logs.ts`, `eventually.ts`, `reconcile` in `escrow.ts` | adapt | The Wilson-score ranking over `service_registered`, `held`, `released`, `refunded` and `timed_out` (a timeout is its own event here). Reconciliation joins each call's escrow events with the token's `transfer` events in the same transactions, instead of filtering TIP-20 memos. |
+| (none) | new | **An indexer** (see the note after the decisions): it polls `getEvents` for the escrow's events and for the token transfers to and from the escrow, stores them on disk with a cursor and resumes after a restart. The gateway and the reconciliation read from it. Its history starts when it first runs, or 7 days earlier at most. |
+| `apps/dashboard` | adapt | The same views (live feed, the per-call proof drawer with offline re-verification, reconciliation, scores), with Stellar addresses, 7-decimal amounts, stellar.expert links and the `timed_out` outcome |
+| `scripts/e2e-gateway.sh`, `apps/gateway/test/e2e.test.ts` | adapt | `scripts/gateway-cases.sh`: the three canonical outcomes paid through the gateway with MPP and with x402, each call then reconciled from the indexer's events, on a local network and in CI |
+| `onboard.ts`, `public.ts`, `limits.ts`, `mcp.ts`, `apps/mcp`, `deploy/` | defer | Vendor onboarding is M3 in the roadmap. The public demo, the MCP server and hosting come after M2. |
+
+### Testing and CI
+
+- **Unit tests.** The method and the scheme against a mock chain, with the cases of Fermata's
+  `gateway.test.ts`; the indexer and the reconciliation against recorded events; the scores.
+- **End to end in CI.**
+  - The stack: a quickstart network with the testnet passphrase (so Stellar's Charge and x402
+    `exact` run unmodified), the escrow, three vendors, a notary, the attestor, the gateway and an
+    agent. Every way to pay is exercised.
+  - `exact` is facilitated in process with `@x402/stellar` and the relayer key, because hosted
+    facilitators cannot reach a local network.
+  - A local network with testnet's passphrase only uses keys made for the run, never testnet keys.
+- **Testnet.** Commands for the owner, because this environment cannot reach testnet.
+  OpenZeppelin's API keys and Circle's USDC faucet are web forms, so they cannot be scripted.
+
+### Decisions
+
+The repository owner took the recommended option on each question (2026-10-14).
+
+1. **Stellar's Charge.** Its npm release needs stellar-sdk 15 and mppx 0.6, and this repository
+   uses stellar-sdk 16. `@stellar/mpp` is pinned to `main` @ `90394ec` (unreleased), with mppx
+   0.10.1, until the next npm release ships.
+2. **Who submits the escrowed x402 scheme's holds.** The roadmap said "settled through the
+   OpenZeppelin Relayer facilitator", but that facilitator accepts only `exact`. The scheme's
+   facilitator runs in the gateway. It submits holds through OpenZeppelin's Channels service (the
+   Relayer plugin that pays the fees) when an API key is set, and from the gateway's relayer
+   account otherwise. `exact` goes through OpenZeppelin's x402 facilitator.
+3. **The scheme's name** is `fermata`. It is documented as the escrow flow of `auth-capture`
+   without partial capture or refund after capture.
+4. **Session escrow and sampled proving.** Both need new contract functions, so a new deployment
+   (the escrow cannot be upgraded), and sampling changes the guarantee. The gateway, both methods
+   and reconciliation come first. A separate design then goes to the owner for approval before
+   any code.
+
+The indexer is our own unless the owner prefers a third-party one: it runs on a local network
+and in CI, and keeps history from the moment it starts.
