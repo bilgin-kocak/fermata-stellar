@@ -33,12 +33,14 @@ case "$NETWORK" in
 testnet)
   PASSPHRASE="Test SDF Network ; September 2015"
   EXPLORER="https://stellar.expert/explorer/testnet"
+  RPC="${RPC_URL:-https://soroban-testnet.stellar.org}"
   NET=(--network testnet)
   ;;
 local)
   PASSPHRASE="${LOCAL_PASSPHRASE:-Standalone Network ; February 2017}"
   EXPLORER=""
-  NET=(--rpc-url "${RPC_URL:-http://localhost:8000/rpc}" --network-passphrase "$PASSPHRASE")
+  RPC="${RPC_URL:-http://localhost:8000/rpc}"
+  NET=(--rpc-url "$RPC" --network-passphrase "$PASSPHRASE")
   ;;
 *)
   echo "NETWORK must be testnet or local, got '$NETWORK'" >&2
@@ -161,6 +163,16 @@ build_attestor() {
 }
 
 latest_ledger() { stellar ledger latest "${NET[@]}" --output json | jq -r .sequence; }
+
+# rpc METHOD PARAMS_JSON: one Stellar RPC call; prints its result.
+rpc() {
+  curl -sS --noproxy localhost,127.0.0.1 -X POST -H 'content-type: application/json' \
+    -d "$(jq -nc --arg m "$1" --argjson p "$2" '{jsonrpc: "2.0", id: 1, method: $m, params: $p}')" "$RPC" |
+    jq -c .result
+}
+
+# The ledger a transaction landed in (while the RPC still has it).
+tx_ledger() { rpc getTransaction "$(jq -nc --arg h "$1" '{hash: $h}')" | jq -r '.ledger // empty'; }
 
 # sha256 of stdin as hex (sha256sum on Linux, shasum on macOS).
 sha256_hex() {

@@ -94,6 +94,7 @@ mkdir -p "$(dirname "$DEPLOYMENT")"
 jq -n \
   --arg network "$NETWORK" --arg passphrase "$PASSPHRASE" --arg explorer "$EXPLORER" \
   --arg escrow "$ESCROW" --arg wasm_hash "$WASM_HASH" --arg deploy_tx "$DEPLOY_TX" \
+  --arg deploy_ledger "$(tx_ledger "$DEPLOY_TX")" \
   --arg owner "$OWNER" --arg treasury "$TREASURY" --argjson fee_bps "$FEE_BPS" \
   --arg token_mode "$TOKEN" --arg asset "$ASSET" --arg sac "$TOKEN_SAC" \
   --arg service_id "$SERVICE_ID" --arg vendor "$VENDOR" --arg label "$LABEL" \
@@ -108,6 +109,7 @@ jq -n \
   '{
     network: $network, network_passphrase: $passphrase, explorer: $explorer,
     escrow: {contract_id: $escrow, wasm_hash: $wasm_hash, deploy_tx: $deploy_tx,
+             deploy_ledger: ($deploy_ledger | tonumber? // null),
              owner: $owner, treasury: $treasury, fee_bps: $fee_bps},
     token: {mode: $token_mode, asset: $asset, sac: $sac, decimals: 7},
     service: {id: $service_id, owner: $vendor, label: $label, payout: $vendor,

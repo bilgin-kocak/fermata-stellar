@@ -93,7 +93,7 @@ for p in "$OK_PORT" "$E500_PORT" "$HANG_PORT" "$NOTARY_PORT"; do wait_port "$p";
 NOTARY_KEY_HASH="$(jq -r .notaryKeyHash "$LOGS/notary.json")"
 
 attestor_args=(--network "$NETWORK" --network-passphrase "$PASSPHRASE" --escrow "$ESCROW")
-[ -n "${RPC_URL:-}" ] && attestor_args+=(--rpc "$RPC_URL")
+attestor_args+=(--rpc "$RPC")
 FERMATA_VERIFIER_SECRET="$(verifier_secret)" "$ATTEST" serve "${attestor_args[@]}" \
   --listen "127.0.0.1:$ATTESTOR_PORT" --notary "127.0.0.1:$NOTARY_PORT" --ca "$CA" \
   --predicate "$ROOT/predicates" --storage "$LOGS/presentations" --attempt-timeout-secs 10 \
