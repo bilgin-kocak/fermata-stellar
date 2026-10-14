@@ -4,7 +4,7 @@
 // authorization covers the token transfer inside it with its exact amount. So an agent can sign
 // only the authorization and let someone else submit the transaction and pay its fee ("pull" in
 // Stellar's MPP Charge, the sponsored flow of x402 `exact`), or submit the transaction itself
-// ("push"). The sponsored flow follows Stellar's MPP Charge (stellar/stellar-mpp-sdk @ 90394ec, MIT:
+// ("push"). The sponsored flow follows Stellar's MPP Charge (stellar/stellar-mpp-sdk @ 90394ec, MIT per its package.json; no code copied:
 // `charge/client/Charge.ts`, `charge/server/Charge.ts`, `shared/verify-auth.ts`): the client builds
 // the call with the all-zero account as source and signs only its authorization entry; the sponsor
 // checks the entry, rebuilds the transaction from its own account, simulates it in enforce mode and

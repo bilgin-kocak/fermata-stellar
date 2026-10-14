@@ -1,3 +1,4 @@
+// Copied from Fermata apps/dashboard/tsconfig.json @ d7cc642 (github.com/bilgin-kocak/fermata, MIT).
 {
   "compilerOptions": {
     "target": "ES2022",

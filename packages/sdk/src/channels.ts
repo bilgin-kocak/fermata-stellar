@@ -2,9 +2,9 @@
 // signed authorization entries, from a pool of channel accounts, with the fee paid by the service's
 // fund account. It runs as an OpenZeppelin Relayer plugin, hosted (an API key from a web form) or
 // self-hosted. This is a minimal client for the one request Fermata needs, written against the
-// plugin's documented API (`@openzeppelin/relayer-plugin-channels` 0.21.0, MIT, README "Submit with
-// Function and Auth" and `src/client/channels-client.ts`): POST `{ params: { func, auth } }`,
-// answered with `{ success, data: { transactionId, hash, status }, error }`.
+// plugin's documented API (`@openzeppelin/relayer-plugin-channels` 0.21.0 @ c7cf073, README "Submit
+// with Function and Auth" and `src/client/channels-client.ts`; no code copied): POST
+// `{ params: { func, auth } }`, answered with `{ success, data: { transactionId, hash, status }, error }`.
 
 export type ChannelsConfig = {
   /** The managed service (`https://channels.openzeppelin.com/testnet`) or a Relayer's base URL. */
