@@ -7,9 +7,19 @@
 //!   POST /v1/reverify { callId, serviceId?, predicateHash? } → offline re-check (no key, no chain)
 //!   GET  /v1/presentations/<callId>   → the presentation bytes (for anyone to re-verify offline)
 //!
+//! Sessions (with `--session-contract`; `session.rs`, docs/session-escrow.md):
+//!
+//!   POST /v1/session/attest     SessionCallBody → check the ticket, prove, check → the call's entry
+//!   POST /v1/session/unanswered SessionCallBody → check the ticket, record the call UNANSWERED
+//!   POST /v1/session/statement  { sessionId, to } → the signed batch statement for settle_batch
+//!   GET  /v1/session/<sessionId>               → the calls this attestor recorded
+//!
 //! Errors: 400 bad input; 422 { check, detail } when a binding check fails (no verdict);
 //! 502 { error: "no-transcript" } when proving failed — never a verdict without a presentation.
-//! Proving is serialised: concurrent MPC sessions deadlock on small machines.
+//! For sessions also 409 { error: "out-of-order" } for a call that is not the next one, or a
+//! statement over calls the book does not have; a session call that was admitted but not proved
+//! (502 or 422) is recorded UNANSWERED. Proving is serialised: concurrent MPC sessions deadlock on
+//! small machines.
 //!
 //! Copied from Fermata `apps/attestor/src/serve.rs` @ d7cc642 (github.com/bilgin-kocak/fermata,
 //! Apache-2.0). The routes, the error codes and proving in a child process are unchanged. Changed:
@@ -38,10 +48,11 @@ use fermata_verdict::{
 };
 
 use crate::{
-    chain::SorobanChain,
+    chain::{ChainView, SorobanChain},
     config::PredicateStore,
     hashes::{Origin, hex0x, keccak256, parse_hex32, to_hex},
-    verify::{self, VerifyError},
+    session::{self, Books, CallRequest, Refusal, SessionTarget},
+    verify::{self, Check, VerifyError},
 };
 
 pub struct State {
@@ -64,6 +75,33 @@ pub struct State {
     pub max_sent: usize,
     pub max_recv: usize,
     pub prove_lock: Mutex<()>,
+    /// The session contract, when sessions are enabled.
+    pub session: Option<SessionTarget>,
+    /// The calls of each session this attestor recorded.
+    pub books: Books,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionCallBody {
+    session_id: String,
+    n: u32,
+    /// The agent's ticket for call `n` (hex).
+    ticket: String,
+    url: String,
+    #[serde(default = "default_method")]
+    method: String,
+    #[serde(default)]
+    headers: HashMap<String, String>,
+    #[serde(default)]
+    body: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StatementBody {
+    session_id: String,
+    to: u32,
 }
 
 #[derive(Deserialize)]
@@ -374,6 +412,219 @@ impl State {
     }
 }
 
+impl State {
+    fn sessions(&self) -> Result<&SessionTarget, (StatusCode, Value)> {
+        self.session.as_ref().ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                json!({ "error": "sessions are not enabled (start with --session-contract)" }),
+            )
+        })
+    }
+
+    /// Parses a session call and runs the checks before proving (`session::admit`).
+    async fn admit(
+        &self,
+        body: &SessionCallBody,
+        for_proving: bool,
+    ) -> Result<session::Admitted, (StatusCode, Value)> {
+        let bad = |e: anyhow::Error| {
+            (
+                StatusCode::BAD_REQUEST,
+                json!({ "error": format!("{e:#}") }),
+            )
+        };
+        let target = self.sessions()?;
+        parse_hex32(&body.session_id).map_err(bad)?;
+        fermata_verdict::parse_hex::<64>(&body.ticket).map_err(|e| bad(anyhow!("ticket: {e}")))?;
+        let (_, request_target) = split_url(&body.url).map_err(bad)?;
+        let req = CallRequest {
+            session_id: body.session_id.clone(),
+            n: body.n,
+            ticket: body.ticket.clone(),
+            method: body.method.clone(),
+            target: request_target,
+            body: body.body.as_bytes().to_vec(),
+        };
+        let verifier = self.key.verifying_key().to_bytes();
+        let admitted = session::admit(
+            &self.chain,
+            target,
+            &verifier,
+            &self.books,
+            &req,
+            for_proving,
+        )
+        .await
+        .map_err(refusal)?;
+        match self
+            .books
+            .reserve(&admitted.session_id, &admitted.session, admitted.record())
+            .await
+        {
+            Ok(Ok(())) => Ok(admitted),
+            Ok(Err(e)) => Err(refusal(Refusal::Book(e))),
+            Err(e) => Err(internal(e)),
+        }
+    }
+
+    /// Records an admitted call's result and answers with it.
+    async fn record(
+        &self,
+        a: &session::Admitted,
+        entry: fermata_verdict::session::Entry,
+    ) -> Result<Value, (StatusCode, Value)> {
+        let r = self
+            .books
+            .complete(&a.session_id, a.n, entry)
+            .await
+            .map_err(internal)?;
+        Ok(json!({
+            "sessionId": to_hex(&a.session_id),
+            "n": r.n,
+            "callId": to_hex(&r.call_id),
+            "requestHash": to_hex(&r.request_hash),
+            "chain": to_hex(&r.chain),
+            "entry": r.entry,
+        }))
+    }
+
+    /// Proves a session call and records its entry; a call that is not proved is UNANSWERED.
+    async fn session_attest(&self, body: &SessionCallBody) -> Result<Value, (StatusCode, Value)> {
+        let a = self.admit(body, true).await?;
+        let admitted = &a;
+        let unanswered = |status: StatusCode, mut detail: Value| async move {
+            let recorded = self
+                .record(admitted, fermata_verdict::session::Entry::unanswered())
+                .await?;
+            detail["recorded"] = recorded;
+            Err::<Value, _>((status, detail))
+        };
+        let prove_body = ProveBody {
+            call_id: to_hex(&a.call_id),
+            url: body.url.clone(),
+            method: body.method.clone(),
+            headers: body.headers.clone(),
+            body: body.body.clone(),
+        };
+        let (out, _) = match self.prove(&prove_body).await {
+            Ok(proved) => proved,
+            Err((status, detail)) => return unanswered(status, detail).await,
+        };
+        let bytes = match tokio::fs::read(self.presentation_path(&a.call_id)).await {
+            Ok(b) => b,
+            Err(e) => {
+                return unanswered(
+                    internal(e.into()).0,
+                    json!({ "error": "presentation lost" }),
+                )
+                .await;
+            }
+        };
+        let checked = async {
+            let v = verify::verify_presentation(&bytes, &self.roots)?;
+            let predicate = self
+                .predicates
+                .get(&a.session.predicate_hash)
+                .ok_or_else(|| VerifyError {
+                    check: Check::Predicate,
+                    detail: format!(
+                        "no predicate on file for predicateHash {}",
+                        to_hex(&a.session.predicate_hash)
+                    ),
+                })?;
+            let now = self
+                .chain
+                .latest_timestamp()
+                .await
+                .map_err(|e| VerifyError {
+                    check: Check::Session,
+                    detail: format!("chain time: {e:#}"),
+                })?;
+            session::decide_call(&v, &a, &predicate, now)
+        };
+        let (entry, failures) = match checked.await {
+            Ok(decided) => decided,
+            Err(v) => {
+                return unanswered(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    json!({ "error": "binding-check-failed", "check": v.check, "detail": v.detail }),
+                )
+                .await;
+            }
+        };
+        let mut recorded = self.record(&a, entry).await?;
+        recorded["outcome"] = json!(verify::outcome_name(
+            if entry.result == fermata_verdict::session::RESULT_DELIVERED {
+                fermata_verdict::OUTCOME_DELIVERED
+            } else {
+                fermata_verdict::OUTCOME_FAILED
+            }
+        ));
+        recorded["failures"] = json!(failures);
+        recorded["presentationHash"] = json!(to_hex(&keccak256(&bytes)));
+        recorded["response"] = proved_response(&bytes, &self.roots);
+        recorded["prove"] = out;
+        Ok(recorded)
+    }
+
+    async fn session_unanswered(
+        &self,
+        body: &SessionCallBody,
+    ) -> Result<Value, (StatusCode, Value)> {
+        let a = self.admit(body, false).await?;
+        self.record(&a, fermata_verdict::session::Entry::unanswered())
+            .await
+    }
+
+    async fn session_statement(&self, body: &StatementBody) -> Result<Value, (StatusCode, Value)> {
+        let target = self.sessions()?;
+        let session_id = parse_hex32(&body.session_id).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                json!({ "error": format!("{e:#}") }),
+            )
+        })?;
+        let signed = session::sign_statement(
+            &self.chain,
+            target,
+            &self.key,
+            &self.books,
+            session_id,
+            body.to,
+        )
+        .await
+        .map_err(refusal)?;
+        serde_json::to_value(signed).map_err(|e| internal(e.into()))
+    }
+
+    async fn session_calls(&self, id: &str) -> Result<Value, (StatusCode, Value)> {
+        self.sessions()?;
+        let session_id = parse_hex32(id).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                json!({ "error": format!("{e:#}") }),
+            )
+        })?;
+        let calls = self.books.calls(&session_id).await.map_err(internal)?;
+        Ok(json!({ "sessionId": to_hex(&session_id), "calls": calls }))
+    }
+}
+
+fn refusal(r: Refusal) -> (StatusCode, Value) {
+    match r {
+        Refusal::Check(v) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            json!({ "error": "binding-check-failed", "check": v.check, "detail": v.detail }),
+        ),
+        Refusal::Book(b) => (
+            StatusCode::CONFLICT,
+            json!({ "error": "out-of-order", "detail": b.0 }),
+        ),
+        Refusal::Other(e) => internal(e),
+    }
+}
+
 fn internal(e: anyhow::Error) -> (StatusCode, Value) {
     error!("{e:#}");
     (
@@ -419,11 +670,29 @@ async fn route(
                 "ok": true,
                 "network": state.chain.network_passphrase,
                 "escrow": contract_address(&state.chain.escrow),
+                "sessionContract": state.session.as_ref().map(|t| contract_address(&t.contract)),
                 "signer": account_address(&signer),
                 "signerKey": to_hex(&signer),
                 "notary": state.notary,
                 "predicates": state.predicates.len(),
             }))
+        }
+        (Method::POST, "/v1/session/attest") => match parse::<SessionCallBody>(req).await {
+            Ok(body) => state.session_attest(&body).await,
+            Err(e) => Err(e),
+        },
+        (Method::POST, "/v1/session/unanswered") => match parse::<SessionCallBody>(req).await {
+            Ok(body) => state.session_unanswered(&body).await,
+            Err(e) => Err(e),
+        },
+        (Method::POST, "/v1/session/statement") => match parse::<StatementBody>(req).await {
+            Ok(body) => state.session_statement(&body).await,
+            Err(e) => Err(e),
+        },
+        (Method::GET, p) if p.starts_with("/v1/session/") => {
+            state
+                .session_calls(p.trim_start_matches("/v1/session/"))
+                .await
         }
         (Method::POST, "/v1/prove") => match parse::<ProveBody>(req).await {
             Ok(body) => state.prove(&body).await.map(|(out, call_id)| {

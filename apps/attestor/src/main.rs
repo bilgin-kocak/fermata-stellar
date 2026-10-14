@@ -25,6 +25,7 @@ use fermata_attest::{
     predicate::Predicate,
     prove::{self, ProveRequest},
     serve::{self, State, split_url},
+    session::{Books, SessionTarget},
     tunnel::Proxy,
     verify,
 };
@@ -131,6 +132,13 @@ enum Cmd {
         predicates: Vec<PathBuf>,
         #[arg(long, default_value = "storage/presentations")]
         storage: PathBuf,
+        /// The session contract (`C…` or hex) whose sessions this attestor proves and settles;
+        /// it must read the same escrow. Without it the session routes answer 404.
+        #[arg(long, env = "FERMATA_SESSION_CONTRACT")]
+        session_contract: Option<String>,
+        /// Where the calls of each session are recorded (one JSON-lines file per session).
+        #[arg(long, default_value = "storage/sessions")]
+        sessions: PathBuf,
     },
     /// Print the registration hashes (originHash, notaryKeyHash, predicateHash).
     Hashes {
@@ -405,11 +413,21 @@ async fn main() -> Result<()> {
             signer,
             predicates,
             storage,
+            session_contract,
+            sessions,
         } => {
             let key = signing_key(&signer)?;
             let chain = chain.connect().await?;
             let predicates = PredicateStore::load(&predicates)?;
             ensure!(!predicates.is_empty(), "no predicates loaded");
+            let session = match session_contract {
+                Some(c) => {
+                    let id = contract_id(&c)?;
+                    chain.check_session_contract(&id).await?;
+                    Some(SessionTarget::new(&chain.network_passphrase, id))
+                }
+                None => None,
+            };
             let state = State {
                 chain,
                 roots: trust_roots(&net.ca, net.roots.is_some())?,
@@ -426,6 +444,8 @@ async fn main() -> Result<()> {
                 max_sent: net.max_sent,
                 max_recv: net.max_recv,
                 prove_lock: Default::default(),
+                session,
+                books: Books::new(sessions),
             };
             serve::run(listen, state).await
         }

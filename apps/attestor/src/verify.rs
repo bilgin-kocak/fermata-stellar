@@ -55,6 +55,11 @@ pub enum Check {
     Hold,
     Call,
     Time,
+    /// A session call: the session is not open, this attestor is not its verifier, k > 1, or the
+    /// session's calls have ended (`session.rs`).
+    Session,
+    /// A session call: the agent's ticket for call n does not cover this request (`session.rs`).
+    Ticket,
 }
 
 #[derive(Debug)]

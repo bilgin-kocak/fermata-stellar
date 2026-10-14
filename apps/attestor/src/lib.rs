@@ -15,5 +15,6 @@ pub mod notary;
 pub mod predicate;
 pub mod prove;
 pub mod serve;
+pub mod session;
 pub mod tunnel;
 pub mod verify;

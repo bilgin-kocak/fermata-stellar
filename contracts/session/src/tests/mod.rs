@@ -1,5 +1,6 @@
 mod setup;
 
+mod attest_vector;
 mod close;
 mod cost;
 mod invariants;

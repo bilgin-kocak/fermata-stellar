@@ -594,6 +594,274 @@ async fn attestor_end_to_end() {
     }
 }
 
+// ------------------------------------------------------------------------------------ sessions
+
+/// The session contract the session vector is signed for: `attest_vector.rs` in
+/// `contracts/session` registers the contract at this id.
+const SESSION_CONTRACT: [u8; 32] = {
+    let mut id = [0u8; 32];
+    id[30] = 0x5e;
+    id[31] = 0x1a;
+    id
+};
+const SESSION_ID: [u8; 32] = [0x5d; 32];
+/// The agent's ticket key (test only).
+const TICKET_SEED: [u8; 32] = [0x7c; 32];
+
+fn session_request(
+    notary: &str,
+    port: u16,
+    roots: &[CertificateDer],
+    call_id: [u8; 32],
+    target: &str,
+) -> ProveRequest {
+    ProveRequest {
+        target: target.into(),
+        ..request(notary, port, roots, call_id, default_redactions())
+    }
+}
+
+/// Session calls (phase 1, every call proved) proved for real against the demo vendor: the
+/// agent's tickets checked before proving, a DELIVERED call, a FAILED one (an unknown symbol, 404)
+/// and one recorded UNANSWERED, then the batch statement over the three, which
+/// `contracts/session/src/tests/attest_vector.rs` settles. Also two refusals: a ticket that does
+/// not cover the request (before any proof), and a proof of another call's header.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs node + openssl; run with --ignored"]
+async fn session_calls_end_to_end() {
+    use fermata_attest::{
+        chain::{SESSION_OPEN, SessionInfo},
+        session::{self, Books, CallRequest, Refusal, SessionTarget},
+    };
+    use fermata_verdict::session as fs;
+
+    let vendor_dir = root().join("apps/vendor");
+    if !vendor_dir.join("certs/ca.pem").exists() {
+        assert!(
+            Command::new("bash")
+                .arg(vendor_dir.join("gen-certs.sh"))
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    let roots = load_roots(&vendor_dir.join("certs/ca.pem")).unwrap();
+    let predicate = std::fs::read(root().join("predicates/quote-v1.json")).unwrap();
+    let (_vendor, port) = vendor("").await;
+    let (_notary, notary_addr) = spawn_notary(NOTARY_KEY, &vendor_dir.join("certs/ca.pem")).await;
+    let mut services = Vec::new();
+    let (sid, svc) = register(&mut services, "session", port, &predicate);
+
+    let t = now();
+    let ticket_key = SigningKey::from_bytes(&TICKET_SEED);
+    let target = SessionTarget::new(TESTNET_PASSPHRASE, SESSION_CONTRACT);
+    let chain = MockChain::default();
+    chain.services.lock().await.insert(sid, svc.clone());
+    let opened = SessionInfo {
+        agent: account_address(&[0xa9; 32]),
+        service_id: sid,
+        token: contract_address(&TOKEN),
+        payout: account_address(&VENDOR),
+        price: PRICE,
+        fee_bps: 50,
+        verifier: verifier().verifying_key().to_bytes(),
+        predicate_hash: predicate_hash(&predicate),
+        ticket_key: ticket_key.verifying_key().to_bytes(),
+        max_calls: 4,
+        sample_k: 1,
+        batch_size: 4,
+        opened_at: t - 5,
+        deadline: t + 300 + u64::from(WINDOW),
+        settled: 0,
+        chain: SESSION_ID,
+        seed: [0; 32],
+        status: SESSION_OPEN,
+    };
+    chain
+        .sessions
+        .lock()
+        .await
+        .insert((SESSION_CONTRACT, SESSION_ID), opened);
+    *chain.now.lock().await = t;
+    let dir = std::env::temp_dir().join(format!("fermata-session-books-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let books = Books::new(&dir);
+    let me = verifier().verifying_key().to_bytes();
+
+    // Call n with the agent's ticket over the chain so far.
+    let call = |n: u32, prev: [u8; 32], target_path: &str| {
+        let rh = request_hash(&sid, "GET", target_path, b"");
+        let chain_n = fs::chain_next(&prev, &rh);
+        CallRequest {
+            session_id: to_hex(&SESSION_ID),
+            n,
+            ticket: to_hex(&fs::sign_ticket(
+                &ticket_key,
+                &target.domain,
+                &SESSION_ID,
+                n,
+                &chain_n,
+            )),
+            method: "GET".into(),
+            target: target_path.into(),
+            body: vec![],
+        }
+    };
+
+    let mut prev = SESSION_ID;
+    let mut calls = Vec::new();
+    for (n, path, expected) in [
+        (1u32, TARGET, fs::RESULT_DELIVERED),
+        (2, "/v1/quote?symbol=NOPE-USD", fs::RESULT_FAILED),
+    ] {
+        let a = session::admit(&chain, &target, &me, &books, &call(n, prev, path), true)
+            .await
+            .unwrap();
+        books
+            .reserve(&SESSION_ID, &a.session, a.record())
+            .await
+            .unwrap()
+            .unwrap();
+        let p = prove_ok(&session_request(
+            &notary_addr,
+            port,
+            &roots,
+            a.call_id,
+            path,
+        ))
+        .await;
+        let v = verify::verify_presentation(&p, &roots).unwrap();
+        let (entry, failures) = session::decide_call(&v, &a, &predicate, t).unwrap();
+        assert_eq!(entry.result, expected, "call {n}: {failures:?}");
+        assert_eq!(entry.presentation_hash, keccak256(&p));
+        let r = books.complete(&SESSION_ID, n, entry).await.unwrap();
+        calls.push(json!({
+            "n": n,
+            "target": path,
+            "call_id": to_hex(&a.call_id),
+            "request_hash": to_hex(&a.request_hash),
+            "chain": to_hex(&a.chain),
+            "entry": r.entry,
+        }));
+        prev = a.chain;
+    }
+    // Call 3 gets no proof (here: the gateway reports it unanswered).
+    let path3 = "/v1/quote?symbol=ETH-USD";
+    let a3 = session::admit(&chain, &target, &me, &books, &call(3, prev, path3), false)
+        .await
+        .unwrap();
+    books
+        .reserve(&SESSION_ID, &a3.session, a3.record())
+        .await
+        .unwrap()
+        .unwrap();
+    books
+        .complete(&SESSION_ID, 3, fs::Entry::unanswered())
+        .await
+        .unwrap();
+    calls.push(json!({
+        "n": 3,
+        "target": path3,
+        "call_id": to_hex(&a3.call_id),
+        "request_hash": to_hex(&a3.request_hash),
+        "chain": to_hex(&a3.chain),
+        "entry": fs::Entry::unanswered(),
+    }));
+
+    // Refused before proving: a ticket that does not cover the request.
+    let mut forged = call(4, a3.chain, TARGET);
+    forged.target = "/v1/quote?symbol=SOL-USD".into();
+    match session::admit(&chain, &target, &me, &books, &forged, true).await {
+        Err(Refusal::Check(v)) => assert_eq!(v.check, Check::Ticket),
+        other => panic!("expected a ticket refusal, got {other:?}"),
+    }
+    // A proof made for another call's header does not bind to call 4.
+    let a4 = session::admit(
+        &chain,
+        &target,
+        &me,
+        &books,
+        &call(4, a3.chain, TARGET),
+        true,
+    )
+    .await
+    .unwrap();
+    let other_call = fs::call_id(&SESSION_CONTRACT, &SESSION_ID, 5);
+    let p = prove_ok(&session_request(
+        &notary_addr,
+        port,
+        &roots,
+        other_call,
+        TARGET,
+    ))
+    .await;
+    let v = verify::verify_presentation(&p, &roots).unwrap();
+    assert_eq!(
+        session::decide_call(&v, &a4, &predicate, t)
+            .unwrap_err()
+            .check,
+        Check::Call
+    );
+
+    // The statement over calls 1-3: what settle_batch takes.
+    let signed = session::sign_statement(&chain, &target, &verifier(), &books, SESSION_ID, 3)
+        .await
+        .unwrap();
+    let results: Vec<u32> = signed.entries.iter().map(|e| e.result).collect();
+    assert_eq!(
+        results,
+        [
+            fs::RESULT_DELIVERED,
+            fs::RESULT_FAILED,
+            fs::RESULT_UNANSWERED
+        ]
+    );
+    let signature = parse_hex::<64>(&signed.signature).unwrap();
+    fs::verify_statement(&me, &target.domain, &signed.statement, &signature).unwrap();
+    assert_eq!(signed.statement.chain, a3.chain);
+    std::fs::remove_dir_all(&dir).unwrap();
+
+    // ------------------------------------------------- acceptance vector for the session contract
+    let vector = json!({
+        "note": "Generated by apps/attestor/tests/attest.rs (session_calls_end_to_end): a batch statement the attestor signed over two calls proved with TLSNotary against the demo vendor (a 200 quote and a 404) and one call recorded unanswered. Hex has no 0x prefix.",
+        "network_passphrase": TESTNET_PASSPHRASE,
+        "network_id": to_hex(&network_id(TESTNET_PASSPHRASE)),
+        "contract": contract_address(&SESSION_CONTRACT),
+        "contract_id": to_hex(&SESSION_CONTRACT),
+        "owner": account_address(&VENDOR),
+        "owner_xdr": to_hex(&Owner::Account(VENDOR).sc_val_xdr()),
+        "label": to_hex(&svc.label),
+        "label_text": "session",
+        "service_id": to_hex(&sid),
+        "origin": origin(port).canonical(),
+        "origin_hash": to_hex(&svc.origin_hash),
+        "notary_key_hash": to_hex(&svc.notary_key_hash),
+        "predicate_hash": to_hex(&svc.predicate_hash),
+        "price_per_call": PRICE.to_string(),
+        "settlement_window": WINDOW,
+        "verifier": { "public_key": to_hex(&me), "address": account_address(&me) },
+        "ticket_key": { "public_key": to_hex(&ticket_key.verifying_key().to_bytes()) },
+        "session_id": to_hex(&SESSION_ID),
+        "max_calls": 4,
+        "batch_size": 4,
+        "calls": calls,
+        "statement": signed.statement,
+        "message": signed.message,
+        "signature": signed.signature,
+        "ticket": signed.ticket,
+    });
+    let text = serde_json::to_string_pretty(&vector).unwrap() + "\n";
+    let out = root().join("out/session-attest-v1.json");
+    std::fs::create_dir_all(out.parent().unwrap()).unwrap();
+    std::fs::write(&out, &text).unwrap();
+    println!("wrote {}", out.display());
+    if std::env::var("FERMATA_UPDATE_VECTORS").as_deref() == Ok("1") {
+        let committed = root().join("test-vectors/session-attest-v1.json");
+        std::fs::write(&committed, &text).unwrap();
+        println!("wrote {}", committed.display());
+    }
+}
+
 /// Soak: N sequential proofs from one long-lived process (the `serve` situation). Reports how many
 /// attempts each needed.   SOAK=20 cargo test --release soak -- --ignored --nocapture
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

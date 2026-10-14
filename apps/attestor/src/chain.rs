@@ -67,11 +67,48 @@ pub struct ServiceInfo {
     pub notary_key_hash: [u8; 32],
 }
 
+/// `SessionStatus::Open` in `contracts/session`. Status 0 stands for a session never opened.
+pub const SESSION_OPEN: u32 = 1;
+
+/// `get_session(session_id)` of the session contract (`contracts/session`, `Session`). Every field
+/// is zero or empty, and `status` is 0, for a session id that was never opened (`None`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SessionInfo {
+    pub agent: String,
+    pub service_id: [u8; 32],
+    pub token: String,
+    pub payout: String,
+    pub price: i128,
+    pub fee_bps: u32,
+    /// The Ed25519 key whose batch statements settle the session (the service's verifier).
+    pub verifier: [u8; 32],
+    pub predicate_hash: [u8; 32],
+    /// The agent's Ed25519 key for tickets.
+    pub ticket_key: [u8; 32],
+    pub max_calls: u32,
+    pub sample_k: u32,
+    pub batch_size: u32,
+    pub opened_at: u64,
+    /// The last ledger time at which a batch is accepted: expiry plus the settlement window.
+    pub deadline: u64,
+    pub settled: u32,
+    /// `chain(settled)`.
+    pub chain: [u8; 32],
+    pub seed: [u8; 32],
+    pub status: u32,
+}
+
 /// Read-only chain access the verifier needs. `SorobanChain` in production, `MockChain` in tests.
 pub trait ChainView: Send + Sync {
     fn hold(&self, call_id: [u8; 32]) -> impl Future<Output = Result<HoldInfo>> + Send;
     fn service(&self, service_id: [u8; 32]) -> impl Future<Output = Result<ServiceInfo>> + Send;
     fn latest_timestamp(&self) -> impl Future<Output = Result<u64>> + Send;
+    /// The session `session_id` of the session contract `contract`.
+    fn session(
+        &self,
+        contract: [u8; 32],
+        session_id: [u8; 32],
+    ) -> impl Future<Output = Result<SessionInfo>> + Send;
 }
 
 // ------------------------------------------------------------------------------------------- XDR
@@ -247,6 +284,59 @@ pub fn decode_service(v: &ScVal) -> Result<ServiceInfo> {
     })
 }
 
+/// Decodes `get_session`'s `Option<Session>`.
+pub fn decode_session(v: &ScVal) -> Result<SessionInfo> {
+    if matches!(v, ScVal::Void) {
+        return Ok(SessionInfo::default());
+    }
+    let f = fields(
+        v,
+        "Session",
+        &[
+            "agent",
+            "batch_size",
+            "chain",
+            "deadline",
+            "fee_bps",
+            "max_calls",
+            "opened_at",
+            "payout",
+            "predicate_hash",
+            "price",
+            "sample_k",
+            "seed",
+            "service_id",
+            "settled",
+            "status",
+            "ticket_key",
+            "token",
+            "verifier",
+        ],
+    )?;
+    let session = SessionInfo {
+        agent: address_field(&f, "agent")?,
+        service_id: bytes_n(&f, "service_id")?,
+        token: address_field(&f, "token")?,
+        payout: address_field(&f, "payout")?,
+        price: i128_field(&f, "price")?,
+        fee_bps: u32_field(&f, "fee_bps")?,
+        verifier: bytes_n(&f, "verifier")?,
+        predicate_hash: bytes_n(&f, "predicate_hash")?,
+        ticket_key: bytes_n(&f, "ticket_key")?,
+        max_calls: u32_field(&f, "max_calls")?,
+        sample_k: u32_field(&f, "sample_k")?,
+        batch_size: u32_field(&f, "batch_size")?,
+        opened_at: u64_field(&f, "opened_at")?,
+        deadline: u64_field(&f, "deadline")?,
+        settled: u32_field(&f, "settled")?,
+        chain: bytes_n(&f, "chain")?,
+        seed: bytes_n(&f, "seed")?,
+        status: u32_field(&f, "status")?,
+    };
+    ensure!(session.status != 0, "Session with status 0");
+    Ok(session)
+}
+
 // ---------------------------------------------------------------------------------------- JSON-RPC
 
 /// Soroban RPC client for one escrow on one network. Plain `http://` (a local network) or
@@ -383,7 +473,17 @@ impl SorobanChain {
 
     /// Simulates a read-only call of the escrow and returns its value.
     pub async fn simulate(&self, function: &str, args: Vec<ScVal>) -> Result<ScVal> {
-        let tx = invocation(&self.escrow, function, args)?.to_xdr_base64(Limits::none())?;
+        self.simulate_at(&self.escrow, function, args).await
+    }
+
+    /// Simulates a read-only call of `contract` and returns its value.
+    pub async fn simulate_at(
+        &self,
+        contract: &[u8; 32],
+        function: &str,
+        args: Vec<ScVal>,
+    ) -> Result<ScVal> {
+        let tx = invocation(contract, function, args)?.to_xdr_base64(Limits::none())?;
         let result = self
             .call("simulateTransaction", json!({ "transaction": tx }))
             .await?;
@@ -399,6 +499,25 @@ impl SorobanChain {
 
     async fn read_hold(&self, call_id: &[u8; 32]) -> Result<HoldInfo> {
         decode_hold(&self.simulate("get_hold", vec![bytes32(call_id)]).await?)
+    }
+
+    /// Checks that `contract` is a session contract that reads this escrow (its `escrow` view).
+    pub async fn check_session_contract(&self, contract: &[u8; 32]) -> Result<()> {
+        match self.simulate_at(contract, "escrow", vec![]).await {
+            Ok(ScVal::Address(ScAddress::Contract(ContractId(Hash(id))))) if id == self.escrow => {
+                Ok(())
+            }
+            Ok(other) => bail!(
+                "{} is not a session contract of the escrow {}: escrow() returned {other:?}",
+                contract_address(contract),
+                contract_address(&self.escrow)
+            ),
+            Err(e) => Err(e.context(format!(
+                "no session contract at {} on {}",
+                contract_address(contract),
+                self.rpc
+            ))),
+        }
     }
 }
 
@@ -426,6 +545,27 @@ impl ChainView for SorobanChain {
         )
     }
 
+    /// Like a hold, a session just opened may not be visible on every RPC node yet: one that
+    /// reads as never opened is read again for a few seconds.
+    async fn session(&self, contract: [u8; 32], session_id: [u8; 32]) -> Result<SessionInfo> {
+        let read = || async {
+            decode_session(
+                &self
+                    .simulate_at(&contract, "get_session", vec![bytes32(&session_id)])
+                    .await?,
+            )
+        };
+        let mut session = read().await?;
+        for _ in 0..6 {
+            if session.status != 0 {
+                break;
+            }
+            sleep(Duration::from_secs(1)).await;
+            session = read().await?;
+        }
+        Ok(session)
+    }
+
     /// The close time of the latest ledger: what `env.ledger().timestamp()` was in it.
     async fn latest_timestamp(&self) -> Result<u64> {
         let ledger = self.call("getLatestLedger", Value::Null).await?;
@@ -440,11 +580,15 @@ impl ChainView for SorobanChain {
     }
 }
 
+/// Sessions of the mock chain, by (session contract, session id).
+pub type MockSessions = HashMap<([u8; 32], [u8; 32]), SessionInfo>;
+
 /// In-memory chain for tests and offline tooling.
 #[derive(Default)]
 pub struct MockChain {
     pub holds: Mutex<HashMap<[u8; 32], HoldInfo>>,
     pub services: Mutex<HashMap<[u8; 32], ServiceInfo>>,
+    pub sessions: Mutex<MockSessions>,
     pub now: Mutex<u64>,
 }
 
@@ -471,6 +615,16 @@ impl ChainView for MockChain {
 
     async fn latest_timestamp(&self) -> Result<u64> {
         Ok(*self.now.lock().await)
+    }
+
+    async fn session(&self, contract: [u8; 32], session_id: [u8; 32]) -> Result<SessionInfo> {
+        Ok(self
+            .sessions
+            .lock()
+            .await
+            .get(&(contract, session_id))
+            .cloned()
+            .unwrap_or_default())
     }
 }
 
@@ -566,6 +720,67 @@ mod tests {
         );
         // never held
         assert_eq!(decode_hold(&ScVal::Void).unwrap(), HoldInfo::default());
+    }
+
+    fn session_view(status: u32) -> Vec<(&'static str, ScVal)> {
+        vec![
+            ("agent", account([0xa9; 32])),
+            ("batch_size", ScVal::U32(8)),
+            ("chain", bytes32(&[0x5a; 32])),
+            ("deadline", ScVal::U64(1_700_086_520)),
+            ("fee_bps", ScVal::U32(50)),
+            ("max_calls", ScVal::U32(100)),
+            ("opened_at", ScVal::U64(1_700_000_000)),
+            ("payout", account([0xbe; 32])),
+            ("predicate_hash", bytes32(&[0x44; 32])),
+            ("price", i128_val(100_000)),
+            ("sample_k", ScVal::U32(1)),
+            ("seed", bytes32(&[0; 32])),
+            ("service_id", bytes32(&[0x22; 32])),
+            ("settled", ScVal::U32(3)),
+            ("status", ScVal::U32(status)),
+            ("ticket_key", bytes32(&[0x7c; 32])),
+            (
+                "token",
+                ScVal::Address(ScAddress::Contract(ContractId(Hash([0x70; 32])))),
+            ),
+            ("verifier", bytes32(&[0x0b; 32])),
+        ]
+    }
+
+    #[test]
+    fn decodes_a_session() {
+        let s = decode_session(&map(session_view(SESSION_OPEN))).unwrap();
+        assert_eq!(s.agent, account_address(&[0xa9; 32]));
+        assert_eq!(s.token, contract_address(&[0x70; 32]));
+        assert_eq!(
+            (s.service_id, s.chain, s.ticket_key, s.verifier),
+            ([0x22; 32], [0x5a; 32], [0x7c; 32], [0x0b; 32])
+        );
+        assert_eq!(
+            (s.max_calls, s.sample_k, s.batch_size, s.settled, s.status),
+            (100, 1, 8, 3, SESSION_OPEN)
+        );
+        assert_eq!(
+            (s.price, s.fee_bps, s.opened_at, s.deadline),
+            (100_000, 50, 1_700_000_000, 1_700_086_520)
+        );
+        // never opened
+        assert_eq!(
+            decode_session(&ScVal::Void).unwrap(),
+            SessionInfo::default()
+        );
+        // a missing field, an extra one, a wrong type, status 0
+        let mut missing = session_view(1);
+        missing.pop();
+        assert!(decode_session(&map(missing)).is_err());
+        let mut extra = session_view(1);
+        extra.push(("zeta", ScVal::U32(0)));
+        assert!(decode_session(&map(extra)).is_err());
+        let mut wrong = session_view(1);
+        wrong[13].1 = ScVal::U64(3);
+        assert!(decode_session(&map(wrong)).is_err());
+        assert!(decode_session(&map(session_view(0))).is_err());
     }
 
     #[test]

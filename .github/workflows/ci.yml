@@ -90,6 +90,11 @@ jobs:
       - name: Integration test (real MPC sessions)
         run: cargo test --locked --release --test attest attestor_end_to_end -- --ignored --nocapture
 
+      # Session calls proved for real: tickets checked before proving, DELIVERED and FAILED
+      # entries, and the batch statement over them.
+      - name: Integration test (session calls, real MPC sessions)
+        run: cargo test --locked --release --test attest session_calls_end_to_end -- --ignored --nocapture
+
   sdk:
     name: TypeScript (SDK, gateway, dashboard)
     runs-on: ubuntu-24.04

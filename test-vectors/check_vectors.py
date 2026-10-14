@@ -10,6 +10,8 @@ an implementation that shares no code with the Rust crates, the contracts or the
   must verify under the recorded public key.
 - session-v1.json: session tickets, batch statements, call ids, the sample and the seed chain
   (docs/session-escrow.md, section 10); the fixed seeds must reproduce every signature.
+- session-attest-v1.json: a batch statement the attestor signed over session calls it proved
+  with TLSNotary; the statement and the agent's ticket must verify under the recorded keys.
 
     python3 test-vectors/check_vectors.py [path/to/vector.json ...]
 """
@@ -215,6 +217,46 @@ def check_session_vectors(path: Path, doc: dict) -> str:
     return f"{len(doc['sessions'])} sessions: {tickets} tickets, {statements} batch statements, seed chains and samples"
 
 
+def check_session_attest_vector(path: Path, doc: dict) -> str:
+    network = hashlib.sha256(doc["network_passphrase"].encode()).digest()
+    assert network.hex() == doc["network_id"], "network id"
+    contract = bytes.fromhex(doc["contract_id"])
+    assert strkey("C", contract) == doc["contract"], "contract address"
+    label = bytes.fromhex(doc["label"])
+    assert label.rstrip(b"\0").decode() == doc["label_text"], "label"
+    sid = service_id(bytes.fromhex(doc["owner_xdr"]), label)
+    assert sid == doc["service_id"], "service id"
+    predicate_bytes = (path.parent.parent / "predicates" / "quote-v1.json").read_bytes()
+    assert hashlib.sha256(predicate_bytes).hexdigest() == doc["predicate_hash"], "predicate hash"
+    session = bytes.fromhex(doc["session_id"])
+    chain, body, results = session, b"", []
+    for i, c in enumerate(doc["calls"]):
+        n = i + 1
+        assert c["n"] == n
+        rh = request_hash(sid, "GET", c["target"], b"")
+        assert rh == c["request_hash"], f"request hash {n}"
+        chain = hashlib.sha256(chain + bytes.fromhex(rh)).digest()
+        assert chain.hex() == c["chain"], f"chain({n})"
+        assert hashlib.sha256(CALL_TAG + contract + session + be32(n)).hexdigest() == c["call_id"]
+        e = c["entry"]
+        body += be32(e["result"]) + bytes.fromhex(e["presentation_hash"]) + bytes.fromhex(e["response_hash"])
+        results.append(e["result"])
+    assert results == [DELIVERED, FAILED, UNANSWERED], results
+    to = len(doc["calls"])
+    st = doc["statement"]
+    entries_hash = hashlib.sha256(body).digest()
+    assert (st["from"], st["to"], st["chain"], st["entries_hash"]) == (0, to, chain.hex(), entries_hash.hex())
+    message = (BATCH_TAG + network + contract + session + bytes.fromhex(sid) + bytes.fromhex(doc["predicate_hash"])
+               + be32(0) + be32(to) + chain + ZERO + entries_hash)
+    assert message.hex() == doc["message"], "statement message"
+    verifier = Ed25519PublicKey.from_public_bytes(bytes.fromhex(doc["verifier"]["public_key"]))
+    verifier.verify(bytes.fromhex(doc["signature"]), message)
+    ticket = TICKET_TAG + network + contract + session + be32(to) + chain
+    ticket_key = Ed25519PublicKey.from_public_bytes(bytes.fromhex(doc["ticket_key"]["public_key"]))
+    ticket_key.verify(bytes.fromhex(doc["ticket"]), ticket)
+    return f"{to} session calls (DELIVERED, FAILED, UNANSWERED): statement, ticket, chain, call ids, request hashes"
+
+
 def check_attest_vector(path: Path, doc: dict) -> str:
     network_id = hashlib.sha256(doc["network_passphrase"].encode()).digest()
     assert network_id.hex() == doc["network_id"], "network id"
@@ -243,6 +285,8 @@ def main(paths: list[Path]) -> None:
         doc = json.loads(path.read_text())
         if "sessions" in doc:
             check = check_session_vectors
+        elif "ticket_key" in doc:
+            check = check_session_attest_vector
         elif "delivered" in doc:
             check = check_attest_vector
         else:
@@ -252,5 +296,10 @@ def main(paths: list[Path]) -> None:
 
 if __name__ == "__main__":
     here = Path(__file__).resolve().parent
-    default = [here / "verdict-v1.json", here / "attest-v1.json", here / "session-v1.json"]
+    default = [
+        here / "verdict-v1.json",
+        here / "attest-v1.json",
+        here / "session-v1.json",
+        here / "session-attest-v1.json",
+    ]
     main([Path(a) for a in sys.argv[1:]] or default)
