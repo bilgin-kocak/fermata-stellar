@@ -1,6 +1,7 @@
 packages:
   - "packages/*"
   - "apps/gateway"
+  - "apps/dashboard"
 # @stellar/mpp is pinned to a commit of stellar/stellar-mpp-sdk (unreleased; see docs/PORTING_NOTES.md,
 # section 10) and built from source on install.
 onlyBuiltDependencies:

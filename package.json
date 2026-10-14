@@ -14,6 +14,8 @@
     "sdk:bindings": "bash packages/sdk/scripts/bindings.sh",
     "gateway:start": "pnpm -F @fermata-stellar/gateway start",
     "gateway:test": "pnpm -F @fermata-stellar/gateway test",
-    "gateway:typecheck": "pnpm -F @fermata-stellar/gateway typecheck"
+    "gateway:typecheck": "pnpm -F @fermata-stellar/gateway typecheck",
+    "dashboard:build": "pnpm -F @fermata-stellar/dashboard build",
+    "dashboard:dev": "pnpm -F @fermata-stellar/dashboard dev"
   }
 }
