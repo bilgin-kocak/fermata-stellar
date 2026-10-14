@@ -1,9 +1,10 @@
 // Read-only views of the escrow and of chain time, by simulation through the generated client: no
 // account and no key needed. Services are immutable, so they are cached once found.
+import { Account, Address, Contract, TransactionBuilder } from '@stellar/stellar-sdk'
 import { Buffer } from 'buffer'
 import { Client as EscrowClient, Status } from './escrow/bindings.ts'
 import { fromHex, toHex, type Hex } from './hex.ts'
-import { rpcServer } from './soroban.ts'
+import { NULL_ACCOUNT, rpcServer, scBigint, simulate } from './soroban.ts'
 
 export type ServiceInfo = {
   serviceId: Hex
@@ -96,4 +97,16 @@ export class EscrowReader {
     const latest = await rpcServer(this.rpcUrl).getLatestLedger()
     return BigInt(latest.closeTime)
   }
+}
+
+/** A SEP-41 token's `balance(id)`, by simulation. */
+export async function tokenBalance(rpcUrl: string, networkPassphrase: string, token: string, id: string): Promise<bigint> {
+  const server = rpcServer(rpcUrl)
+  const tx = new TransactionBuilder(new Account(NULL_ACCOUNT, '0'), { fee: '100', networkPassphrase })
+    .addOperation(new Contract(token).call('balance', new Address(id).toScVal()))
+    .setTimeout(30)
+    .build()
+  const sim = await simulate(server, tx)
+  if (!sim.result) throw new Error('balance returned nothing')
+  return scBigint(sim.result.retval)
 }
