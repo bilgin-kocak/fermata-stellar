@@ -510,7 +510,7 @@ The repository owner took the recommended option on each question (2026-10-14).
 4. **Session escrow and sampled proving.** Both need new contract functions, so a new deployment
    (the escrow cannot be upgraded), and sampling changes the guarantee. The gateway, both methods
    and reconciliation come first. A separate design then goes to the owner for approval before
-   any code.
+   any code: [`proposal-session-escrow.md`](proposal-session-escrow.md).
 
 The indexer is our own unless the owner prefers a third-party one: it runs on a local network
 and in CI, and keeps history from the moment it starts.
@@ -553,6 +553,14 @@ started (decision 4).
     reads each record again before acting, and two tests reproduce the interleavings.
 - **Process cleanup.** The cases script recorded the pid of the subshell that started the gateway,
   so the gateway outlived the script. The subshell now execs it.
+- **The RPC's scan window.** stellar-rpc scans at most 10,000 ledgers per `getEvents` request
+  (`LedgerScanLimit`, stellar-rpc @ `40277d1`). A page that ends at that window is short, with a
+  cursor at the window's last ledger.
+  - **The bug.** The indexer took any short page for the end of the history. Local networks and CI
+    never had 10,000 ledgers, so nothing showed it; on testnet, an escrow deployed more than about
+    14 hours earlier would have been read only in part.
+  - **The fix.** The indexer now reads until its cursor reaches the RPC's latest ledger, and a test
+    with a windowed fake RPC covers it.
 - **The attestor on a custom passphrase.** `fermata-attest` needs `--rpc` for any network other
   than testnet and mainnet, and the scripts now always pass it. A CI run caught this when the
   scripts began naming a local network by its passphrase.

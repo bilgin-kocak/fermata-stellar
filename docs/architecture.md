@@ -316,6 +316,8 @@ also checks:
   `["transfer", escrow, *, **]`.
 - **New tokens.** Tokens are learned from `service_registered`. A new token's transfers are
   backfilled from the ledger of its registration.
+- **Paging.** Each poll reads until its cursor reaches the RPC's latest ledger. A short page is not
+  enough to stop on: the RPC scans at most 10,000 ledgers per request.
 - **Storage.** Events are appended to `events.jsonl` and the cursor is kept in `state.json`, so a
   restart resumes where it stopped.
 - **Where history starts.** At the escrow's deployment ledger (`escrow.deploy_ledger` in the
@@ -410,7 +412,7 @@ vectors, and the CLI as the scripts drive it.
 - **Ignored tests.** A soak test and a test against a real third-party vendor
   (registry.npmjs.org) are ported as ignored tests.
 
-**`packages/sdk` (48 tests, plus 15 live tests).**
+**`packages/sdk` (50 tests, plus 15 live tests).**
 
 - **Parity with `verdict-v1.json`.** Every message and signature is reproduced. Signatures for
   other domains are rejected, and changing any field breaks the signature.
@@ -430,6 +432,8 @@ vectors, and the CLI as the scripts drive it.
 - **x402 (2).** Requirements carry a fresh call id each time, and are accepted back only
   unchanged, from this server, for this request, before they expire.
 - **OpenZeppelin Channels (3).** The request and its answer, against a fake.
+- **Indexer paging (2).** Against a fake RPC with stellar-rpc's 10,000-ledger scan window, a poll
+  reads on to the latest ledger.
 - **Reconciliation (6) and scores (5).** Reconciliation runs on recorded event sequences: a
   release, a refund, a timeout and an open hold, plus wrong amounts, a second settlement, a hold
   missing from the index and the per-token balances. The scores tests are Fermata's, on Stellar's
@@ -488,8 +492,9 @@ The testnet run is described in the README.
 ## Where later work attaches
 
 - **Session escrow and sampled proving (the rest of Milestone 2).** Both need new contract
-  functions, so a new escrow deployment (this one cannot be upgraded), and sampling changes what a
-  payment guarantees. A design goes to the owner for approval before any code.
+  functions, so a new contract (this escrow cannot be upgraded), and sampling changes what a
+  payment guarantees. The proposal, awaiting the owner's decision, is
+  [`proposal-session-escrow.md`](proposal-session-escrow.md).
 - **Milestone 3.** Vendor onboarding attaches to the gateway (Fermata's `onboard.ts`), and mainnet
   needs the security audit first.
 - **Trust minimization.** An independent notary needs no code change: a service pins its notary's

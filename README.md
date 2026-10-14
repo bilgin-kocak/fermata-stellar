@@ -39,8 +39,9 @@ This repository makes Stellar Fermata's primary home. It ports
   - **Reconciliation.** An indexer keeps the escrow's and the token's events, and every call
     reconciles from them. A dashboard shows the calls.
 
-  Session escrow and sampled proving, the rest of Milestone 2, are designed next. They need the
-  owner's approval before any code.
+  Session escrow and sampled proving, the rest of Milestone 2, are a proposal
+  ([`docs/proposal-session-escrow.md`](docs/proposal-session-escrow.md)) awaiting the owner's
+  decision. Nothing of it is built.
 
 **In these milestones the notary is run by the same operator as the attestor** (the scripts start
 one with a key made for the run). An independent notary is the first trust-minimization step on
@@ -125,14 +126,14 @@ How the parts map from Tempo:
 | Escrow: `register_service`, `hold`, `settle`, `claim_timeout`, fee and treasury administration, events | **Implemented and tested on Stellar** ([`contracts/escrow`](contracts/escrow), 62 tests) |
 | Stellar verdict: encoding, Ed25519 signer, strict verification, CLI, golden vectors | **Implemented and tested on Stellar** ([`crates/fermata-verdict`](crates/fermata-verdict), 28 tests; [`test-vectors/`](test-vectors)) |
 | TLSNotary attestor: proving, notary, 7 binding checks, predicates, HTTP API, offline re-verification | **Implemented and tested on Stellar** ([`apps/attestor`](apps/attestor): 14 unit tests and an integration test with real MPC-TLS sessions; its verdicts settle on the escrow in the contract tests) |
-| TypeScript SDK: typed escrow client, verdict encoding and signatures, registration hashes, holds, the MPP method and the x402 scheme, indexer, reconciliation, scores | **Implemented and tested on Stellar** ([`packages/sdk`](packages/sdk): 48 tests, plus 15 live tests against a deployment) |
+| TypeScript SDK: typed escrow client, verdict encoding and signatures, registration hashes, holds, the MPP method and the x402 scheme, indexer, reconciliation, scores | **Implemented and tested on Stellar** ([`packages/sdk`](packages/sdk): 50 tests, plus 15 live tests against a deployment) |
 | Deployment and the canonical cases (`scripts/`) | **Implemented and tested on Stellar**, on a local network (protocol 29) and in CI. The testnet run is pending; see [Live on testnet](#live-on-testnet). <br>• `demo-cases.sh` (M0, script-signed verdicts): 3/3 <br>• `attest-cases.sh` (M1, real TLSNotary proofs): 3/3 <br>• `gateway-cases.sh` (M2, paid through the gateway): 8 calls, 42 checks |
 | Gateway: the `fermata` MPP method and x402 scheme (escrowed), Stellar's MPP Charge and x402 `exact` (unprotected), the sweeper, the read API | **Implemented and tested on Stellar** ([`apps/gateway`](apps/gateway): 23 tests, and `gateway-cases.sh`) |
 | Holds submitted through OpenZeppelin's Channels service; `exact` through OpenZeppelin's x402 facilitator | **Implemented, not run against OpenZeppelin's hosted services**, which need testnet and an API key. The Channels client passes a live test against a stand-in that implements the documented API; `exact` is tested with a facilitator in the gateway's process. |
 | Indexer, reconciliation from events, vendor scores | **Implemented and tested on Stellar** (`packages/sdk`; in `gateway-cases.sh` every call, and the escrow as a whole, reconciles from the indexed events) |
 | Dashboard | **Ported** ([`apps/dashboard`](apps/dashboard)). It typechecks and builds in CI, and the gateway serves it. There are no browser tests. |
 | MCP server (`fermata-mcp`), self-serve onboarding | **Only in the Tempo version**. Onboarding is planned in M3. |
-| Session escrow, sampled proving | **Planned** (M2). Designed next, for the owner's approval before any code; in neither version yet. |
+| Session escrow, sampled proving | **Proposed** (M2), awaiting the owner's decision: [`docs/proposal-session-escrow.md`](docs/proposal-session-escrow.md). Not built, in neither version. |
 | Mainnet, security audit, design partners | **Planned** (M3) |
 | Independent notary, vendor-chosen verifiers, N-of-M quorum, on-chain presentation verification | **Planned** (trust minimization) |
 
@@ -208,7 +209,7 @@ cargo test --release                              # unit tests; the first build 
 cargo test --release --test attest -- --ignored --nocapture   # real MPC-TLS sessions (node, openssl)
 cd ../..
 
-pnpm install && pnpm sdk:typecheck && pnpm sdk:test   # 48 tests; the live suites need a deployment
+pnpm install && pnpm sdk:typecheck && pnpm sdk:test   # 50 tests; the live suites need a deployment
 pnpm gateway:typecheck && pnpm gateway:test           # 23 tests
 pnpm dashboard:build                                  # apps/dashboard/dist, served by the gateway
 ```
@@ -226,7 +227,7 @@ scripts/demo-cases.sh
 scripts/attest-cases.sh
 FERMATA_DEPLOYMENT=deployments/local.json \
   FERMATA_AGENT_SECRET="$(stellar keys secret fermata-local-agent)" \
-  FERMATA_RELAYER_SECRET="$(stellar keys secret fermata-local-relayer)" pnpm sdk:test   # all 63
+  FERMATA_RELAYER_SECRET="$(stellar keys secret fermata-local-relayer)" pnpm sdk:test   # all 65
 scripts/gateway-cases.sh
 ```
 
@@ -362,7 +363,8 @@ scripts/                   deploy-testnet.sh, demo-cases.sh, attest-cases.sh, ga
                            lib.sh, lib/tls-proxy.mjs)
 predicates/                the demo service's delivery predicate (from Fermata)
 deployments/testnet.json   the testnet deployment (a placeholder until the script runs there)
-docs/                      PORTING_NOTES.md, architecture.md, trust-model.md, security.md
+docs/                      PORTING_NOTES.md, architecture.md, trust-model.md, security.md, and
+                           proposal-session-escrow.md (a proposal, not built)
 ```
 
 ## Prior work

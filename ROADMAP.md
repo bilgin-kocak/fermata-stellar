@@ -75,8 +75,9 @@ re-verification matches the chain. Everything but the testnet run is in place.
   outcome. It passes on a local network and in CI. **The testnet run is pending:** the build
   environment cannot reach testnet, and the README has the commands.
 - **Next: lower proving cost.** Session escrow (hold once for N calls, settle in batches) and
-  sampled proving (prove a random subset the vendor cannot predict). Both need a new contract
-  version and change the guarantee. Their design goes to the owner for approval before any code.
+  sampled proving (prove a random subset the vendor cannot predict). Both need a new contract and
+  change the guarantee. The design is a proposal awaiting the owner's decision, before any code:
+  [`docs/proposal-session-escrow.md`](docs/proposal-session-escrow.md).
 
 Done when an agent pays a vendor through the gateway on testnet with both methods, and every
 outcome reconciles from events. For that, everything but the testnet run is in place.
