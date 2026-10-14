@@ -86,7 +86,7 @@ jobs:
         run: cargo test --locked --release --test attest attestor_end_to_end -- --ignored --nocapture
 
   sdk:
-    name: TypeScript SDK
+    name: TypeScript (SDK, gateway, dashboard)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -100,17 +100,26 @@ jobs:
           pnpm install --frozen-lockfile
       - run: pnpm sdk:typecheck
       - run: pnpm sdk:test
+      - run: pnpm gateway:typecheck
+      - run: pnpm gateway:test
+      - name: Dashboard (typecheck and build)
+        run: pnpm dashboard:build
 
   e2e:
-    name: end to end on a local Stellar network (deploy, M0 cases, M1 cases with real proofs)
+    name: end to end on a local Stellar network (deploy, M0, M1 and M2 cases)
     runs-on: ubuntu-24.04
+    env:
+      NETWORK: local
+      LOCAL_PASSPHRASE: "Test SDF Network ; September 2015"
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
-      - name: Start the local network (protocol 29)
+      # With testnet's passphrase, so that Stellar's MPP Charge and x402 `exact`, which know only the
+      # testnet and mainnet passphrases, run against it unmodified. The keys are made for this run.
+      - name: Start the local network (protocol 29, testnet's passphrase)
         run: |
-          docker run -d --name stellar --network host "$QUICKSTART_IMAGE" \
-            --local --enable core,rpc,horizon --protocol-version 29
+          docker run -d --name stellar --network host -e NETWORK_PASSPHRASE="$LOCAL_PASSPHRASE" \
+            "$QUICKSTART_IMAGE" --local --enable core,rpc,horizon --protocol-version 29
 
       - name: Rust toolchains (root and attestor)
         run: |
@@ -156,19 +165,29 @@ jobs:
           done
 
       - name: Deploy the escrow and the demo service
-        run: NETWORK=local scripts/deploy-testnet.sh
+        run: scripts/deploy-testnet.sh
 
       - name: M0 cases (verdicts signed by the script)
-        run: NETWORK=local scripts/demo-cases.sh
+        run: scripts/demo-cases.sh
 
       - name: M1 cases (real TLSNotary proofs through the attestor)
-        run: NETWORK=local scripts/attest-cases.sh
+        run: scripts/attest-cases.sh
 
-      - name: The SDK's live parity test against the deployment
+      - name: Workspace dependencies
         run: |
           corepack enable
           pnpm install --frozen-lockfile
+
+      # The live suites: the escrow's views, holds through a relayer and through a stand-in Channels
+      # service, the MPP method and the x402 scheme end to end, and the indexer with reconciliation.
+      - name: The SDK's live tests against the deployment
+        run: |
+          FERMATA_AGENT_SECRET="$(stellar keys secret fermata-agent)" \
+          FERMATA_RELAYER_SECRET="$(stellar keys secret fermata-relayer)" \
           FERMATA_DEPLOYMENT=deployments/local.json pnpm sdk:test
+
+      - name: M2 cases (an agent pays through the gateway with MPP and x402; every outcome reconciled)
+        run: scripts/gateway-cases.sh
 
   vectors:
     name: golden vectors, independent Python/OpenSSL check
