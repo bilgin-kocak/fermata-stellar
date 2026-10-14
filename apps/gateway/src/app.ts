@@ -19,7 +19,7 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import path from 'node:path'
 import { serveStatic } from '@hono/node-server/serve-static'
 import { Hono, type Context } from 'hono'
-import { Credential, Receipt, type Method } from 'mppx'
+import { Challenge, Credential, Receipt, type Method } from 'mppx'
 import { discovery } from 'mppx/hono'
 import { Mppx } from 'mppx/server'
 import { decodePaymentSignatureHeader, encodePaymentRequiredHeader, encodePaymentResponseHeader } from '@x402/core/http'
@@ -236,24 +236,45 @@ export async function createGateway(deps: GatewayDeps) {
     return store.update(record.callId, { status: 'settle-pending', error: `settle: ${result.error}` })
   }
 
-  // Calls this process is proving right now. A 'held' record outside this set was interrupted (a
-  // restart mid-proof): the sweeper treats it like awaiting-timeout, so the agent is still refunded.
+  // Calls a request in this process is paying for or proving, from before the call's first record
+  // is written until the response is sent. The sweeper leaves them alone whatever their status: it
+  // would otherwise act on a record the request is about to move on (it once wrote 'awaiting-timeout'
+  // over a call that was being proved). A non-final record outside this set was interrupted (a
+  // restart): the sweeper ends it with claim_timeout, so the agent is still refunded.
   const inFlight = new Set<string>()
   // Proofs are serialised in the attestor: past this many in flight, new payers get 503 before paying.
   const maxInFlight = Number(deps.env?.GATEWAY_MAX_IN_FLIGHT ?? process.env.GATEWAY_MAX_IN_FLIGHT ?? 4)
   const saturated = () => inFlight.size >= maxInFlight
 
+  /** Runs `run` with `callId` marked in flight, unless a caller up the stack already marked it. */
+  async function inFlightDuring<T>(callId: string, run: () => Promise<T>): Promise<T> {
+    if (inFlight.has(callId)) return run()
+    inFlight.add(callId)
+    try {
+      return await run()
+    } finally {
+      inFlight.delete(callId)
+    }
+  }
+
+  /** The call id of an MPP `fermata` credential whose challenge this gateway signed, if any. */
+  function fermataCallOf(request: Request): string | undefined {
+    try {
+      const credential = Credential.fromRequest(request)
+      if (credential.challenge.method !== 'fermata' || !Challenge.verify(credential.challenge, { secretKey: deps.secretKey })) return undefined
+      const callId = (credential.challenge.request as { callId?: unknown }).callId
+      return typeof callId === 'string' && /^[0-9a-f]{64}$/i.test(callId) ? callId.toLowerCase() : undefined
+    } catch {
+      return undefined
+    }
+  }
+
   type Req = { method: string; target: string; headers: Headers; body: Uint8Array; rh: Hex }
   type Paid = { callId: Hex; holdTx?: Hex; paidWith: 'mpp' | 'x402'; sponsored: boolean }
 
   /** After a valid hold: record it, prove the vendor's answer, settle the verdict. */
-  async function fulfil(svc: Service, req: Req, paid: Paid): Promise<{ response: Response; record: CallRecord }> {
-    inFlight.add(paid.callId)
-    try {
-      return await prove(svc, req, paid)
-    } finally {
-      inFlight.delete(paid.callId)
-    }
+  function fulfil(svc: Service, req: Req, paid: Paid): Promise<{ response: Response; record: CallRecord }> {
+    return inFlightDuring(paid.callId, () => prove(svc, req, paid))
   }
 
   async function prove(svc: Service, req: Req, paid: Paid): Promise<{ response: Response; record: CallRecord }> {
@@ -343,28 +364,34 @@ export async function createGateway(deps: GatewayDeps) {
       return paymentRequired(svc, req.rh, url, undefined, 'unreadable PAYMENT-SIGNATURE')
     }
     const accepted = payload.accepted
-    if (accepted?.scheme === 'fermata' && deps.x402?.fermata) {
+    const facilitator = deps.x402?.fermata
+    if (accepted?.scheme === 'fermata' && facilitator) {
       const problem = fermataRequirementsProblem(accepted, fermataOffer(svc, req.rh), deps.secretKey)
       if (problem) return paymentRequired(svc, req.rh, url, undefined, problem)
-      const verified = await deps.x402.fermata.verify(payload, accepted)
+      const verified = await facilitator.verify(payload, accepted)
       if (!verified.isValid) return paymentRequired(svc, req.rh, url, undefined, verified.invalidMessage ?? verified.invalidReason)
       const { callId } = holdTermsOf(accepted)
-      if (await store.get(callId)) return paymentRequired(svc, req.rh, url, undefined, 'this payment was already used')
-      const now = new Date().toISOString()
-      await store.put({
-        callId, serviceId: svc.serviceId, method: req.method, target: req.target, requestHash: req.rh, paidWith: 'x402', sponsored: true,
-        agent: verified.payer, deadline: '0', status: 'holding', createdAt: now, updatedAt: now,
+      // Marked in flight before its first record, with no await in between: a concurrent copy of
+      // this payment is turned away here, and the sweeper leaves the call alone until it is answered.
+      if (inFlight.has(callId)) return paymentRequired(svc, req.rh, url, undefined, 'this payment is already being processed')
+      return inFlightDuring(callId, async () => {
+        if (await store.get(callId)) return paymentRequired(svc, req.rh, url, undefined, 'this payment was already used')
+        const now = new Date().toISOString()
+        await store.put({
+          callId, serviceId: svc.serviceId, method: req.method, target: req.target, requestHash: req.rh, paidWith: 'x402', sponsored: true,
+          agent: verified.payer, deadline: '0', status: 'holding', createdAt: now, updatedAt: now,
+        })
+        const settled = await facilitator.settle(payload, accepted)
+        if (!settled.success) {
+          await store.update(callId, { error: `hold: ${settled.errorMessage ?? settled.errorReason}` })
+          return paymentRequired(svc, req.rh, url, undefined, settled.errorMessage ?? settled.errorReason)
+        }
+        const { response, record } = await fulfil(svc, req, { callId, holdTx: settled.transaction, paidWith: 'x402', sponsored: true })
+        const headers = new Headers(response.headers)
+        headers.set('PAYMENT-RESPONSE', encodePaymentResponseHeader(settled))
+        fermataHeaders(headers, record)
+        return new Response(response.body, { status: response.status, headers })
       })
-      const settled = await deps.x402.fermata.settle(payload, accepted)
-      if (!settled.success) {
-        await store.update(callId, { error: `hold: ${settled.errorMessage ?? settled.errorReason}` })
-        return paymentRequired(svc, req.rh, url, undefined, settled.errorMessage ?? settled.errorReason)
-      }
-      const { response, record } = await fulfil(svc, req, { callId, holdTx: settled.transaction, paidWith: 'x402', sponsored: true })
-      const headers = new Headers(response.headers)
-      headers.set('PAYMENT-RESPONSE', encodePaymentResponseHeader(settled))
-      fermataHeaders(headers, record)
-      return new Response(response.body, { status: response.status, headers })
     }
     const exact = exactRequirements(svc)
     if (accepted?.scheme === 'exact' && exact && deps.x402?.exact) {
@@ -408,18 +435,24 @@ export async function createGateway(deps: GatewayDeps) {
     }
     if (x402 && !mpp) return payX402(c, svc, req, x402)
 
-    const r = await offers(svc, req.rh)(c.req.raw)
-    if (r.status === 402) return paymentRequired(svc, req.rh, c.req.url, r.challenge)
+    // A `fermata` credential's call is marked in flight before the method submits its hold (and,
+    // for a sponsored hold, before the gateway first records it); see inFlight.
+    const payMpp = async () => {
+      const r = await offers(svc, req.rh)(c.req.raw)
+      if (r.status === 402) return paymentRequired(svc, req.rh, c.req.url, r.challenge)
 
-    const credential = Credential.fromRequest(c.req.raw)
-    if (credential.challenge.method !== 'fermata') return r.withReceipt(await unprotected(svc, req))
+      const credential = Credential.fromRequest(c.req.raw)
+      if (credential.challenge.method !== 'fermata') return r.withReceipt(await unprotected(svc, req))
 
-    // The hold transaction: the receipt's reference (for a sponsored hold, known only now).
-    const holdTx = Receipt.fromResponse(r.withReceipt(new Response(null))).reference
-    const payload = credential.payload as { type: string }
-    const callId = (credential.challenge.request as { callId: Hex }).callId
-    const { response, record } = await fulfil(svc, req, { callId, holdTx, paidWith: 'mpp', sponsored: payload.type === 'transaction' })
-    return withFermataReceipt(r.withReceipt(response), record)
+      // The hold transaction: the receipt's reference (for a sponsored hold, known only now).
+      const holdTx = Receipt.fromResponse(r.withReceipt(new Response(null))).reference
+      const payload = credential.payload as { type: string }
+      const callId = (credential.challenge.request as { callId: Hex }).callId
+      const { response, record } = await fulfil(svc, req, { callId, holdTx, paidWith: 'mpp', sponsored: payload.type === 'transaction' })
+      return withFermataReceipt(r.withReceipt(response), record)
+    }
+    const callId = mpp ? fermataCallOf(c.req.raw) : undefined
+    return callId ? inFlightDuring(callId, payMpp) : payMpp()
   }
   app.all('/s/:serviceId', paid)
   app.all('/s/:serviceId/*', paid)
@@ -644,9 +677,13 @@ export async function createGateway(deps: GatewayDeps) {
   async function sweepOnce() {
     const now = await chain.now()
     const done: string[] = []
-    for (const record of await store.list()) {
-      if (FINAL.includes(record.status) || (record.status === 'held' && inFlight.has(record.callId))) continue
+    for (const { callId } of await store.list()) {
+      // Read each record again when its turn comes: the list is a snapshot, and a request may have
+      // moved the call on since. Calls a request is still handling are left to it.
+      const record = await store.get(callId)
+      if (!record || FINAL.includes(record.status) || inFlight.has(callId)) continue
       const hold = await chain.hold(record.callId)
+      if (inFlight.has(callId)) continue
       if (!hold) {
         // A sponsored hold that never landed: its authorization expires within minutes.
         if (record.status === 'holding' && Date.now() - Date.parse(record.createdAt) > 15 * 60_000) {

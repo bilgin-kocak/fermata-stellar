@@ -38,7 +38,7 @@ import { createGateway, toDecimal, type EventSource, type X402Facilitator } from
 import type { AttestInput, AttestResult, Attestor } from '../src/attestor.ts'
 import type { GatewayChain, TxResult } from '../src/chain.ts'
 import type { GatewayConfig } from '../src/config.ts'
-import { CallStore } from '../src/store.ts'
+import { CallStore, type CallRecord } from '../src/store.ts'
 
 const h = (s: string) => toHex(new TextEncoder().encode(s.padEnd(32, '.').slice(0, 32)))
 const escrow = contractAddress(new Uint8Array(32).fill(0xe5))
@@ -197,6 +197,7 @@ function fakeFermataServer(chain: FakeChain) {
     async broadcast({ credential }) {
       const callId = credential.challenge.request.callId!
       if (!(await Store.tryClaim(store as never, `call:${callId}`, Date.now() + 3_600_000))) fail('callId already used')
+      await onBroadcast?.(callId, credential.challenge.request.requestHash)
       return { method: 'fermata', reference: h(`hold ${callId}`), status: 'success', timestamp: new Date().toISOString() }
     },
   })
@@ -221,6 +222,8 @@ let attestor: FakeAttestor
 let store: CallStore
 let gw: Awaited<ReturnType<typeof createGateway>>
 let lastCredential: string | undefined
+/** Runs where the real method submits a sponsored hold (the gateway records the call just before). */
+let onBroadcast: ((callId: Hex, requestHash: Hex) => Promise<void>) | undefined
 
 const config = (over: Partial<GatewayConfig> = {}): GatewayConfig => ({
   port: 0, host: '127.0.0.1', realm: 'gw.test', network: 'stellar:testnet', networkPassphrase: PASSPHRASE, rpcUrl: 'http://unused', escrow,
@@ -286,6 +289,7 @@ async function payX402(p = QUOTE, transaction = 'signed-hold') {
 beforeEach(async () => {
   chain = new FakeChain()
   attestor = new FakeAttestor()
+  onBroadcast = undefined
   gw = await build()
 })
 
@@ -397,6 +401,60 @@ describe('gateway', () => {
     expect(await store.get(lost)).toMatchObject({ status: 'closed' })
     chain.time = 1_121n
     expect(await gw.sweep()).toEqual([landed])
+  })
+
+  it('a sweep leaves a call alone while it is being paid and proved, even from a stale snapshot', async () => {
+    // The race CI caught: the sweeper listed the call while its hold was being submitted
+    // ('holding'), saw the hold land, and wrote over the record the request had moved on to.
+    let release!: () => void
+    const proving = new Promise<void>((ok) => (release = ok))
+    let started!: () => void
+    const attesting = new Promise<void>((ok) => (started = ok))
+    attestor.attest = async (input) => {
+      attestor.calls.push(input)
+      started()
+      await proving
+      return verdict(input.callId, 1, { status: 200, body: '{"price":"1"}' })
+    }
+    const put = store.put.bind(store)
+    let holding: CallRecord | undefined
+    store.put = async (r) => {
+      const written = await put(r)
+      if (r.status === 'holding') holding = written
+      return written
+    }
+    store.list = async () => (holding ? [holding] : []) // the sweeper's snapshot, taken while 'holding'
+
+    const paying = payX402()
+    await attesting // mid-proof: the hold has landed and the record says 'held'
+    const callId = holding!.callId
+    expect((await store.get(callId))?.status).toBe('held')
+    expect(await gw.sweep()).toEqual([])
+    expect((await store.get(callId))?.status).toBe('held')
+    release()
+    const { res } = await paying
+    expect(res.status).toBe(200)
+    const holdTx = decodePaymentResponseHeader(res.headers.get('payment-response')!).transaction
+    expect(res.headers.get('x-fermata-hold-tx')).toBe(holdTx)
+    expect(await store.get(callId)).toMatchObject({ status: 'released', holdTx })
+    expect((await store.get(callId))?.error).toBeUndefined()
+  })
+
+  it('an MPP payment is in flight from before its hold is submitted: a sweep then leaves it alone', async () => {
+    attestor.next = (i) => verdict(i.callId, 1, { status: 200, body: '{"price":"1"}' })
+    let during: string | undefined
+    onBroadcast = async (callId, rh) => {
+      // What main.ts's onSponsoredHold does, then a sweep while the hold is being submitted (it has landed).
+      const now = new Date().toISOString()
+      await store.put({ callId, serviceId: sid, method: '', target: '', requestHash: rh, paidWith: 'mpp', sponsored: true, agent, deadline: '0', status: 'holding', createdAt: now, updatedAt: now })
+      expect(await gw.sweep()).toEqual([])
+      during = (await store.get(callId))?.status
+    }
+    const res = await agentFetch()(QUOTE)
+    expect(res.status).toBe(200)
+    expect(during).toBe('holding')
+    const r = receiptOf(res)
+    expect(await store.get(r.callId as string)).toMatchObject({ status: 'released', holdTx: h(`hold ${r.callId}`) })
   })
 
   it('turns new payers away (503, nothing charged) while proving is saturated', async () => {
