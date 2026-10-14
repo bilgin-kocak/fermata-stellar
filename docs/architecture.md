@@ -493,8 +493,8 @@ The testnet run is described in the README.
 
 - **Session escrow and sampled proving (the rest of Milestone 2).** Both need new contract
   functions, so a new contract (this escrow cannot be upgraded), and sampling changes what a
-  payment guarantees. The proposal, awaiting the owner's decision, is
-  [`proposal-session-escrow.md`](proposal-session-escrow.md).
+  payment guarantees. The design, approved on 2026-10-14, is
+  [`session-escrow.md`](session-escrow.md); phase 1 is in progress.
 - **Milestone 3.** Vendor onboarding attaches to the gateway (Fermata's `onboard.ts`), and mainnet
   needs the security audit first.
 - **Trust minimization.** An independent notary needs no code change: a service pins its notary's

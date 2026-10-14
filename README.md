@@ -39,9 +39,9 @@ This repository makes Stellar Fermata's primary home. It ports
   - **Reconciliation.** An indexer keeps the escrow's and the token's events, and every call
     reconciles from them. A dashboard shows the calls.
 
-  Session escrow and sampled proving, the rest of Milestone 2, are a proposal
-  ([`docs/proposal-session-escrow.md`](docs/proposal-session-escrow.md)) awaiting the owner's
-  decision. Nothing of it is built.
+  Session escrow and sampled proving are the rest of Milestone 2. Their design
+  ([`docs/session-escrow.md`](docs/session-escrow.md)) is approved, and its phase 1 (sessions in
+  which every call is proved) is in progress. Sampling is not built.
 
 **In these milestones the notary is run by the same operator as the attestor** (the scripts start
 one with a key made for the run). An independent notary is the first trust-minimization step on
@@ -133,7 +133,7 @@ How the parts map from Tempo:
 | Indexer, reconciliation from events, vendor scores | **Implemented and tested on Stellar** (`packages/sdk`; in `gateway-cases.sh` every call, and the escrow as a whole, reconciles from the indexed events) |
 | Dashboard | **Ported** ([`apps/dashboard`](apps/dashboard)). It typechecks and builds in CI, and the gateway serves it. There are no browser tests. |
 | MCP server (`fermata-mcp`), self-serve onboarding | **Only in the Tempo version**. Onboarding is planned in M3. |
-| Session escrow, sampled proving | **Proposed** (M2), awaiting the owner's decision: [`docs/proposal-session-escrow.md`](docs/proposal-session-escrow.md). Not built, in neither version. |
+| Session escrow, sampled proving | **In progress** (M2): the design is approved ([`docs/session-escrow.md`](docs/session-escrow.md)); phase 1, sessions in which every call is proved, is being built. Sampling is not built, in neither version. |
 | Mainnet, security audit, design partners | **Planned** (M3) |
 | Independent notary, vendor-chosen verifiers, N-of-M quorum, on-chain presentation verification | **Planned** (trust minimization) |
 
@@ -364,7 +364,7 @@ scripts/                   deploy-testnet.sh, demo-cases.sh, attest-cases.sh, ga
 predicates/                the demo service's delivery predicate (from Fermata)
 deployments/testnet.json   the testnet deployment (a placeholder until the script runs there)
 docs/                      PORTING_NOTES.md, architecture.md, trust-model.md, security.md, and
-                           proposal-session-escrow.md (a proposal, not built)
+                           session-escrow.md (the approved design; phase 1 in progress)
 ```
 
 ## Prior work

@@ -1,9 +1,11 @@
-# Proposal: session escrow and sampled proving
+# Session escrow and sampled proving: the design
 
-**Status: a proposal for the repository owner's decision. Nothing in this file is built.** It is
-decision 4 of [`PORTING_NOTES.md`](PORTING_NOTES.md#decisions): the gateway, both payment methods
-and reconciliation came first, and this design goes to the owner before any code. Written
-2026-10-14.
+**Status: approved by the repository owner on 2026-10-14, with the recommended options (decisions
+2 to 4 at the end); decision 1 stays open until phase 2. Phase 1 (every call proved, k = 1) is in
+progress; sampling (k > 1) is not built and will not be switched on before the measurement in
+section 6.** This was decision 4 of [`PORTING_NOTES.md`](PORTING_NOTES.md#decisions): the gateway,
+both payment methods and reconciliation came first, and this design went to the owner before any
+code. Written 2026-10-14; section 10 specifies phase 1.
 
 Neither part exists in Fermata on Tempo either. Fermata's README lists both under "The production
 shape, none of it built yet", and notes that sampling changes the guarantee.
@@ -117,7 +119,8 @@ carries the following:
 - the agent's ticket for `to`;
 - the revealed seed;
 - one entry per call: a verdict outcome, presentation hash and response hash for a proved call,
-  or `ANSWERED` / `UNANSWERED` for an unproved one;
+  `ANSWERED` for an unproved call, or `UNANSWERED` for any call that got no answer (a sampled
+  call with no answer has no transcript, so it cannot carry a proof);
 - the verifier's Ed25519 signature over a statement of all of it, tagged
   `"FERMATA_STELLAR_BATCH_V1"`.
 
@@ -128,8 +131,8 @@ The contract checks, in order:
    batch, so no call may follow it.
 2. **The agent's ticket.** The request hashes extend the stored chain to `chain(to)`, and the
    ticket's signature verifies under the agent's ticket key.
-3. **The seed and the sample.** `sha256(seed)` is the stored seed. Every sampled call carries a
-   proved outcome, and every other call does not.
+3. **The seed and the sample.** `sha256(seed)` is the stored seed. A proved outcome appears only
+   on a sampled call, `ANSWERED` only on an unsampled one, and `UNANSWERED` on either.
 4. **The verifier's statement.** Its signature verifies under the service's verifier key.
 
 **Payment.** Let A be the unproved answered calls in the batch, D the proved DELIVERED calls and F
@@ -228,12 +231,61 @@ would be set from measured CPU, memory and transaction size against testnet's li
    across failure rates and values of k. Sampling is switched on only if the measurement supports
    it.
 
-## Decisions for the owner
+## 10. Phase 1 specification
 
-1. **The guarantee.** Accept the changed guarantee for k > 1 (section 5), and the
-   indistinguishability assumption it rests on (section 6)?
-2. **The contract's shape.** Recommended: a session contract that reads the existing escrow's
-   registry, fee and treasury. The alternative is a second escrow version holding both the
-   per-call and the session functions, with services registered again.
-3. **The randomness.** Recommended: the verifier's committed hash chain (section 3).
-4. **The order.** Recommended: phase 1 (k = 1) first, and sampling only after the measurement.
+What phase 1 builds, made exact. The contract implements sections 1 to 4 for any k ≥ 1, so phase
+2 needs no new contract; phase 1's gateway and attestor open and settle sessions with k = 1 only.
+
+**Encodings.** Fixed-width, integers big-endian; `contract` is the 32-byte id of the session
+contract, `network` sha256 of the network passphrase:
+
+```
+chain(0)     = session_id
+chain(n)     = sha256(chain(n−1) ‖ request_hash of call n)
+ticket(n)    = "FERMATA_STELLAR_TICKET_V1" ‖ network ‖ contract ‖ session_id ‖ n (u32) ‖ chain(n)          157 bytes
+entry        = result (u32) ‖ presentation_hash ‖ response_hash                                             68 bytes
+entries_hash = sha256(entry of call from+1 ‖ … ‖ entry of call to)
+statement    = "FERMATA_STELLAR_BATCH_V1" ‖ network ‖ contract ‖ session_id ‖ service_id ‖ predicate_hash
+               ‖ from (u32) ‖ to (u32) ‖ chain(to) ‖ seed ‖ entries_hash                                    288 bytes
+sampled(n)   = k = 1, or the first 4 bytes of sha256(seed_j ‖ n (u32)), read as a u32, are a multiple of k
+call_id(n)   = sha256("FERMATA_STELLAR_SESSION_CALL_V1" ‖ contract ‖ session_id ‖ n (u32))
+```
+
+`call_id(n)` is what the attestor proves the call against (its `X-Fermata-Call` header), as a
+hold's call id today. Golden vectors pin every encoding (`test-vectors/session-v1.json`), and the
+contract, `fermata-verdict`, the SDK and the Python check must agree on them.
+
+**Results.** `DELIVERED` = 1 and `FAILED` = 2 (proved: a non-zero presentation hash), `ANSWERED` = 3
+and `UNANSWERED` = 4 (unproved: both hashes zero).
+
+**Batches.** A batch settles calls `from + 1` through `to`, where `from` is what the session has
+settled, and `to − from` is at most B.
+
+- **k = 1.** Nothing is sampled: batches may be any size up to B, the seeds are 32 zero bytes, and
+  the session stays open until `to = max_calls` or until it is closed after its deadline.
+- **k > 1.** Batch j covers exactly calls `(j − 1) × B + 1` through `j × B` and reveals `seed_j`. A
+  shorter batch ends the session, and its remaining deposit is refunded with it.
+
+**Terms.** At opening, the service's price, token, payout, verifier, predicate hash and settlement
+window are copied from the escrow's registry, and its fee is read; services are immutable there,
+so the copy cannot go stale. The treasury is read at each batch, as the escrow reads it at each
+release.
+
+**Limits.** `max_calls` in 1 to 1,000,000, with `max_calls × price` fitting the deposit; k in 1 to
+1,000; B in 1 to 1,000; `expires_at` later than now and at most 30 days ahead. A zero session id,
+ticket key or (with k > 1) seed is refused, and so is a service whose payout is this contract.
+
+**Errors** start at 201, apart from the escrow's (101 to 117) and the Stellar Asset Contract's (1
+to 15). A signature that does not verify is a host crypto error, as in the escrow.
+
+## Decisions taken
+
+The repository owner took the recommended options on 2026-10-14.
+
+1. **The guarantee for k > 1** (section 5) and the indistinguishability assumption (section 6):
+   **open until phase 2.** Phase 1 keeps today's per-call guarantee (k = 1), so it does not depend
+   on this decision.
+2. **The contract's shape: a session contract** that reads the existing escrow's registry, fee and
+   treasury.
+3. **The randomness: the verifier's committed hash chain** (section 3).
+4. **The order: phase 1 (k = 1) first**, and sampling only after the measurement.

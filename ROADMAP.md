@@ -76,8 +76,10 @@ re-verification matches the chain. Everything but the testnet run is in place.
   environment cannot reach testnet, and the README has the commands.
 - **Next: lower proving cost.** Session escrow (hold once for N calls, settle in batches) and
   sampled proving (prove a random subset the vendor cannot predict). Both need a new contract and
-  change the guarantee. The design is a proposal awaiting the owner's decision, before any code:
-  [`docs/proposal-session-escrow.md`](docs/proposal-session-escrow.md).
+  change the guarantee. The owner approved the design on 2026-10-14
+  ([`docs/session-escrow.md`](docs/session-escrow.md)). Phase 1, sessions in which every call is
+  proved, is in progress; sampling comes after a measurement of whether a vendor can tell proved
+  calls apart.
 
 Done when an agent pays a vendor through the gateway on testnet with both methods, and every
 outcome reconciles from events. For that, everything but the testnet run is in place.

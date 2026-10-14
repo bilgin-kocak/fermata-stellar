@@ -510,7 +510,8 @@ The repository owner took the recommended option on each question (2026-10-14).
 4. **Session escrow and sampled proving.** Both need new contract functions, so a new deployment
    (the escrow cannot be upgraded), and sampling changes the guarantee. The gateway, both methods
    and reconciliation come first. A separate design then goes to the owner for approval before
-   any code: [`proposal-session-escrow.md`](proposal-session-escrow.md).
+   any code: [`session-escrow.md`](session-escrow.md), approved on 2026-10-14 with the
+   recommended options.
 
 The indexer is our own unless the owner prefers a third-party one: it runs on a local network
 and in CI, and keeps history from the moment it starts.
