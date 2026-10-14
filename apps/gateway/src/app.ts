@@ -15,6 +15,12 @@
 //   reconciliation joins the escrow's events with the token's transfers instead of memos;
 // - sponsored holds are recorded before they are submitted (status `holding`).
 // Not ported (later milestones): the MCP endpoint, self-serve onboarding, the public demo.
+//
+// Sessions (docs/session-escrow.md, phase 1, with a session contract configured): the 402 also
+// offers the `fermata` method's `session` intent. The first call opens a session (the gateway
+// submits the agent's `open_session`), each later call carries the agent's ticket; every call is
+// proved, and the sweeper settles the recorded calls in batches with the attestor's statements and
+// closes the session after its deadline.
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import path from 'node:path'
 import { serveStatic } from '@hono/node-server/serve-static'
@@ -26,6 +32,7 @@ import { decodePaymentSignatureHeader, encodePaymentRequiredHeader, encodePaymen
 import type { Network, PaymentPayload, PaymentRequirements, SettleResponse, VerifyResponse } from '@x402/core/types'
 import {
   aggregateScores,
+  chainNext,
   eventToJson,
   eventually,
   fermataRequirements,
@@ -36,8 +43,12 @@ import {
   predicateHash,
   reconcileCall,
   reconcileEscrow,
+  reconcileSession,
+  reconcileSessions,
   requestHash,
+  SessionStatus as OnchainSessionStatus,
   type fermataMethod,
+  type fermataSessionMethod,
   type FermataOffer,
   type Hex,
   type IndexedEvent,
@@ -45,6 +56,7 @@ import {
 import type { Attestor, ProvedResponse } from './attestor.ts'
 import type { GatewayChain } from './chain.ts'
 import type { GatewayConfig, ServiceConfig } from './config.ts'
+import { nextOf, type SessionCall, type SessionRecord, type SessionStore } from './sessions.ts'
 import { FINAL, type CallRecord, type CallStore } from './store.ts'
 
 /** An x402 facilitator as the gateway uses it: in process, or OpenZeppelin's over HTTP. */
@@ -75,6 +87,22 @@ export type GatewayDeps = {
   /** x402 facilitators: the `fermata` scheme's and `exact`'s. A scheme without one is not offered. */
   x402?: { fermata?: X402Facilitator; exact?: X402Facilitator }
   indexer?: EventSource
+  /**
+   * Sessions, when the chain has a session contract: the `session` intent's server side
+   * (`fermataSessionServer`; a fake in unit tests), the gateway's records, its limits, and the
+   * session contract's event index.
+   */
+  sessions?: {
+    handler: Method.Server<typeof fermataSessionMethod>
+    store: SessionStore
+    /** B: the calls per batch, which `open_session` must use. */
+    batchSize: number
+    /** The most calls one session may hold a deposit for. */
+    maxCalls: number
+    /** The longest a session may take calls, in seconds. */
+    maxDurationSeconds: number
+    indexer?: EventSource
+  }
   env?: Record<string, string | undefined>
   /** Upstream fetch for the unprotected fallback (needs the vendor's CA). */
   fetchUpstream?: (url: string, init: RequestInit) => Promise<Response>
@@ -92,10 +120,11 @@ export type GatewayDeps = {
 /** JSON-safe copy (bigints as decimal strings). */
 const plain = <T>(v: T): unknown => JSON.parse(JSON.stringify(v, (_, x) => (typeof x === 'bigint' ? x.toString() : x)))
 
-export type Service = ServiceConfig & { price: bigint; token: string; window: number; verifier: Hex; predicateHash: Hex }
+export type Service = ServiceConfig & { price: bigint; token: string; window: number; verifier: Hex; predicateHash: Hex; payout: string }
 
 const HOP_BY_HOP = new Set(['connection', 'keep-alive', 'transfer-encoding', 'content-length', 'upgrade', 'proxy-connection', 'te', 'trailer'])
 const ZERO_HASH = '00'.repeat(32)
+const RESULT_DELIVERED = 1
 const DECIMALS = 7
 
 /** Base units to the decimal string Stellar's MPP Charge takes (classic assets have 7 decimals). */
@@ -123,7 +152,7 @@ async function checkService(deps: GatewayDeps, signerKey: Hex, cfg: ServiceConfi
   if (!s) throw new Error(`service ${cfg.serviceId} is not registered on ${deps.chain.escrow}`)
   if (s.verifier !== signerKey.toLowerCase()) throw new Error(`service ${cfg.serviceId} is settled by ${s.verifier}, not this attestor (${signerKey})`)
   if (originHash(cfg.upstream) !== s.originHash) throw new Error(`service ${cfg.serviceId}: upstream ${cfg.upstream} is not the registered origin`)
-  return { ...cfg, serviceId: s.serviceId, price: s.pricePerCall, token: s.token, window: s.settlementWindow, verifier: s.verifier, predicateHash: s.predicateHash }
+  return { ...cfg, serviceId: s.serviceId, price: s.pricePerCall, token: s.token, window: s.settlementWindow, verifier: s.verifier, predicateHash: s.predicateHash, payout: s.payout }
 }
 
 /** Checks every configured service against the chain and the attestor; refuses to start on mismatch. */
@@ -131,6 +160,9 @@ export async function loadServices(deps: GatewayDeps): Promise<Map<string, Servi
   const health = await deps.attestor.health()
   if (health.escrow !== deps.chain.escrow) throw new Error(`attestor serves escrow ${health.escrow}, gateway ${deps.chain.escrow}`)
   if (health.network !== deps.chain.networkPassphrase) throw new Error(`attestor on "${health.network}", gateway on "${deps.chain.networkPassphrase}"`)
+  if (deps.sessions && health.sessionContract !== deps.chain.sessionContract) {
+    throw new Error(`attestor proves sessions of ${health.sessionContract ?? 'no session contract'}, gateway ${deps.chain.sessionContract}`)
+  }
   const out = new Map<string, Service>()
   for (const cfg of deps.config.services) {
     const s = await checkService(deps, health.signerKey, cfg)
@@ -145,17 +177,40 @@ export async function createGateway(deps: GatewayDeps) {
   const { chain, store, attestor, fermataHandler, chargeHandler } = deps
   const { signerKey } = await attestor.health()
   const network = deps.config.network as Network
-  const methods = chargeHandler ? [fermataHandler, chargeHandler] : [fermataHandler]
+  const sessions = deps.sessions
+  const methods: unknown[] = [fermataHandler, ...(sessions ? [sessions.handler] : []), ...(chargeHandler ? [chargeHandler] : [])]
   const mppx = Mppx.create({ secretKey: deps.secretKey, realm: deps.config.realm, methods: methods as never })
 
   const fermataOffer = (svc: Service, rh: Hex): FermataOffer => ({ network, escrow: chain.escrow, token: svc.token, amount: svc.price, serviceId: svc.serviceId, requestHash: rh })
   const unprotectedAmount = (svc: Service) => BigInt(svc.unprotected?.amount ?? svc.price)
 
-  /** The MPP offers for one request: `fermata`, and Stellar's Charge when the service has a fallback. */
-  const offers = (svc: Service, rh: Hex) => {
+  /**
+   * The MPP offers for one request: `fermata` (a hold), its `session` intent when sessions are
+   * enabled (with the gateway's view of the agent's session, `view`), and Stellar's Charge when the
+   * service has a fallback.
+   */
+  const offers = (svc: Service, rh: Hex, view?: { sessionId: Hex; next: number; chain: Hex }) => {
     const list: [unknown, Record<string, unknown>][] = [
       [fermataHandler, { amount: svc.price.toString(), currency: svc.token, escrow: chain.escrow, network: deps.config.network, serviceId: svc.serviceId, requestHash: rh }],
     ]
+    if (sessions && chain.sessionContract) {
+      list.push([
+        sessions.handler,
+        {
+          amount: svc.price.toString(),
+          currency: svc.token,
+          escrow: chain.escrow,
+          sessionContract: chain.sessionContract,
+          network: deps.config.network,
+          serviceId: svc.serviceId,
+          requestHash: rh,
+          batchSize: sessions.batchSize,
+          maxCalls: sessions.maxCalls,
+          maxDuration: sessions.maxDurationSeconds,
+          ...(view ?? {}),
+        },
+      ])
+    }
     if (svc.unprotected && chargeHandler) {
       list.push([chargeHandler, { amount: toDecimal(unprotectedAmount(svc)), currency: svc.token, recipient: svc.unprotected.recipient }])
     }
@@ -408,6 +463,235 @@ export async function createGateway(deps: GatewayDeps) {
     return paymentRequired(svc, req.rh, url, undefined, `scheme ${accepted?.scheme ?? '?'} is not offered here`)
   }
 
+  // ------------------------------------------------------------------------------ sessions
+
+  // A session's calls and its settlements run one at a time, in order: each writes the session's
+  // record, and the attestor takes a session's calls in order.
+  const sessionQueues = new Map<string, Promise<unknown>>()
+  function sessionQueue<T>(sessionId: string, task: () => Promise<T>): Promise<T> {
+    const run = (sessionQueues.get(sessionId) ?? Promise.resolve()).then(task, task)
+    const settled = run.then(
+      () => undefined,
+      () => undefined,
+    )
+    sessionQueues.set(sessionId, settled)
+    void settled.then(() => sessionQueues.get(sessionId) === settled && sessionQueues.delete(sessionId))
+    return run
+  }
+
+  /** The gateway's view of the session an agent names in `X-Fermata-Session`, for this service. */
+  async function sessionViewFor(svc: Service, headers: Headers) {
+    const id = headers.get('x-fermata-session')?.trim().toLowerCase()
+    if (!sessions || !id || !/^[0-9a-f]{64}$/.test(id)) return undefined
+    const r = await sessions.store.get(id)
+    if (!r || r.serviceId !== svc.serviceId || r.status !== 'open') return undefined
+    return { sessionId: id, ...nextOf(r) }
+  }
+
+  const sessionHeaders = (headers: Headers, record: SessionRecord, call: SessionCall) => {
+    headers.set('X-Fermata-Session', record.sessionId)
+    headers.set('X-Fermata-Session-Status', record.status)
+    headers.set('X-Fermata-Call-N', String(call.n))
+    if (call.outcome) headers.set('X-Fermata-Outcome', call.outcome)
+    if (record.openTx) headers.set('X-Fermata-Open-Tx', record.openTx)
+  }
+
+  const withSessionReceipt = (res: Response, record: SessionRecord, call: SessionCall) => {
+    const base = Receipt.fromResponse(res)
+    const receipt = {
+      ...base,
+      sessionId: record.sessionId,
+      n: call.n,
+      chain: call.chain,
+      outcome: call.outcome ?? null,
+      presentationHash: call.presentationHash ?? null,
+    }
+    res.headers.set('Payment-Receipt', Receipt.serialize(receipt as never))
+    sessionHeaders(res.headers, record, call)
+    return res
+  }
+
+  /** Recorded calls right after the contract's settled ones, in a row: what a batch can settle. */
+  function readyCalls(r: SessionRecord): number {
+    let ready = 0
+    for (const c of [...r.calls].filter((x) => x.n > r.settled).sort((a, b) => a.n - b.n)) {
+      if (c.n !== r.settled + ready + 1 || c.status !== 'recorded') break
+      ready++
+    }
+    return ready
+  }
+
+  /** After a valid session credential: record the call, prove it, record its entry. */
+  function sessionCall(svc: Service, req: Req, payload: { action: 'open' | 'call'; sessionId: string; n?: number; ticket: string }, openTx?: Hex) {
+    const store = sessions!.store
+    const sessionId = payload.sessionId.toLowerCase()
+    const n = payload.action === 'open' ? 1 : payload.n!
+    return sessionQueue(sessionId, async () => {
+      let record = await store.get(sessionId)
+      if (!record) throw new Error(`no record of session ${sessionId}`)
+      if (payload.action === 'open') {
+        const onchain = await eventually(() => chain.session(sessionId), (x) => x !== undefined, 6).catch(() => undefined)
+        record = await store.update(sessionId, { status: 'open', openTx, ...(onchain ? { deadline: onchain.deadline.toString() } : {}) })
+        log(`session ${sessionId.slice(0, 8)} opened for ${record.maxCalls} calls in ${openTx}`)
+      }
+      const { next, chain: prev } = nextOf(record)
+      if (n !== next) throw new Error(`call ${n} of session ${sessionId} is not the next one (${next})`)
+      const call: SessionCall = {
+        n,
+        method: req.method,
+        target: req.target,
+        requestHash: req.rh,
+        chain: chainNext(prev, req.rh),
+        ticket: payload.ticket.toLowerCase(),
+        status: 'proving',
+        createdAt: new Date().toISOString(),
+      }
+      record = await store.put({ ...record, calls: [...record.calls, call] })
+      const result = await attestor.sessionAttest({
+        sessionId,
+        n,
+        ticket: payload.ticket,
+        url: `${svc.upstream}${req.target}`,
+        method: req.method,
+        headers: upstreamHeaders(svc, req.headers),
+        body: Buffer.from(req.body).toString('utf8'),
+      })
+      let response: Response
+      if (result.kind === 'entry') {
+        record = await store.updateCall(sessionId, n, {
+          status: 'recorded',
+          outcome: result.outcome,
+          presentationHash: result.presentationHash,
+          failures: result.failures,
+          proveMs: result.proveMs,
+        })
+        response = provedToResponse(result.response)
+      } else if (result.kind === 'unanswered') {
+        log(`session ${sessionId.slice(0, 8)} call ${n}: no proof (${result.detail}); refunded with its batch`)
+        record = await store.updateCall(sessionId, n, { status: 'recorded', outcome: 'UNANSWERED', error: result.detail })
+        response = Response.json(
+          { error: 'no-proof', detail: result.detail, sessionId, n, outcome: 'UNANSWERED', refund: 'this call is refunded when its batch settles' },
+          { status: 502 },
+        )
+      } else {
+        const detail = result.kind === 'refused' ? `${result.check ?? result.status}: ${result.detail}` : result.detail
+        log(`session ${sessionId.slice(0, 8)} call ${n} NOT RECORDED by the attestor (${detail})`)
+        record = await store.updateCall(sessionId, n, { status: 'unrecorded', error: detail })
+        response = Response.json(
+          { error: result.kind, detail, sessionId, n, status: 'unrecorded', refund: 'the gateway has this call recorded unanswered, refunded with its batch' },
+          { status: result.kind === 'unreachable' ? 504 : 502 },
+        )
+      }
+      if (readyCalls(record) >= record.batchSize) void settleSession(sessionId)
+      return { response, record, call: record.calls.find((c) => c.n === n)! }
+    })
+  }
+
+  const settlingQueued = new Set<string>()
+
+  /**
+   * Settles what is due of a session, in its queue: batches of B recorded calls; after its expiry,
+   * or when it is full, what is left; after its deadline it closes the session. Calls the attestor
+   * did not record are first recorded as unanswered.
+   */
+  function settleSession(sessionId: Hex): Promise<SessionRecord | undefined> {
+    if (!sessions || settlingQueued.has(sessionId)) return Promise.resolve(undefined)
+    settlingQueued.add(sessionId)
+    return sessionQueue(sessionId, async () => {
+      settlingQueued.delete(sessionId)
+      try {
+        return await settleNow(sessionId)
+      } catch (e) {
+        log(`session ${sessionId.slice(0, 8)} settlement failed: ${(e as Error).message}`)
+        return undefined
+      }
+    })
+  }
+
+  async function settleNow(sessionId: Hex): Promise<SessionRecord | undefined> {
+    const store = sessions!.store
+    let record = await store.get(sessionId)
+    if (!record || record.status === 'closed') return record
+    const onchain = await chain.session(sessionId)
+    if (record.status === 'opening') {
+      if (!onchain) {
+        // A sponsored opening that never landed: its authorization expires within minutes.
+        if (Date.now() - Date.parse(record.createdAt) > 15 * 60_000) {
+          return store.update(sessionId, { status: 'closed', error: record.error ?? 'open_session never landed' })
+        }
+        return record
+      }
+      record = await store.update(sessionId, { status: 'open', deadline: onchain.deadline.toString() })
+    }
+    if (!onchain) return record
+    if (onchain.status === OnchainSessionStatus.Closed) {
+      return store.update(sessionId, { status: 'closed', settled: onchain.settled })
+    }
+    if (onchain.settled !== record.settled) record = await store.update(sessionId, { settled: onchain.settled })
+    for (const c of record.calls.filter((x) => x.status === 'unrecorded')) {
+      const svc = services.get(record.serviceId)
+      const r = await attestor.sessionUnanswered({
+        sessionId,
+        n: c.n,
+        ticket: c.ticket,
+        url: `${svc?.upstream ?? ''}${c.target}`,
+        method: c.method,
+        headers: {},
+        body: '',
+      })
+      if (r.kind !== 'unanswered' && r.kind !== 'entry') {
+        log(`session ${sessionId.slice(0, 8)} call ${c.n} is still not recorded: ${r.detail}`)
+        break
+      }
+      record = await store.updateCall(sessionId, c.n, { status: 'recorded', outcome: r.kind === 'entry' ? r.outcome : 'UNANSWERED' })
+    }
+    const now = await chain.now()
+    while (now <= BigInt(record.deadline)) {
+      const ready = readyCalls(record)
+      const due = ready > 0 && (ready >= record.batchSize || now >= BigInt(record.expiresAt) || record.settled + ready === record.maxCalls)
+      if (!due) break
+      const to = record.settled + Math.min(ready, record.batchSize)
+      const st = await attestor.sessionStatement({ sessionId, to })
+      if (!st.ok) {
+        log(`session ${sessionId.slice(0, 8)} statement to ${to} refused: ${st.detail}`)
+        return store.update(sessionId, { error: `statement: ${st.detail}` })
+      }
+      const tx = await chain.settleBatch({
+        sessionId,
+        to,
+        requestHashes: st.signed.requestHashes,
+        ticket: st.signed.ticket,
+        seed: ZERO_HASH,
+        entries: st.signed.entries,
+        statement: st.signed.signature,
+      })
+      if (!tx.ok) {
+        log(`session ${sessionId.slice(0, 8)} settle_batch to ${to} failed: ${tx.error}`)
+        return store.update(sessionId, { error: `settle_batch: ${tx.error}` })
+      }
+      const paid = st.signed.entries.filter((e) => e.result === RESULT_DELIVERED).length
+      log(`session ${sessionId.slice(0, 8)} calls ${record.settled + 1}-${to} settled (${paid} paid) in ${tx.txHash}`)
+      record = await store.put({
+        ...record,
+        settled: to,
+        status: to === record.maxCalls ? 'closed' : record.status,
+        batches: [...record.batches, { from: record.settled, to, paid, txHash: tx.txHash, at: new Date().toISOString() }],
+        error: undefined,
+      })
+      if (record.status === 'closed') return record
+    }
+    if (record.status === 'open' && now > BigInt(record.deadline)) {
+      const tx = await chain.closeSession(sessionId)
+      if (!tx.ok) {
+        log(`session ${sessionId.slice(0, 8)} close_session failed: ${tx.error}`)
+        return store.update(sessionId, { error: `close_session: ${tx.error}` })
+      }
+      log(`session ${sessionId.slice(0, 8)} closed after its deadline in ${tx.txHash}`)
+      record = await store.update(sessionId, { status: 'closed', closeTx: tx.txHash, error: undefined })
+    }
+    return record
+  }
+
   const app = new Hono()
   // Errors as JSON (the dashboard shows `error`), never Hono's plain-text 500.
   app.onError((e, c) => {
@@ -438,11 +722,18 @@ export async function createGateway(deps: GatewayDeps) {
     // A `fermata` credential's call is marked in flight before the method submits its hold (and,
     // for a sponsored hold, before the gateway first records it); see inFlight.
     const payMpp = async () => {
-      const r = await offers(svc, req.rh)(c.req.raw)
+      const r = await offers(svc, req.rh, await sessionViewFor(svc, c.req.raw.headers))(c.req.raw)
       if (r.status === 402) return paymentRequired(svc, req.rh, c.req.url, r.challenge)
 
       const credential = Credential.fromRequest(c.req.raw)
       if (credential.challenge.method !== 'fermata') return r.withReceipt(await unprotected(svc, req))
+      if (credential.challenge.intent === 'session') {
+        const payload = credential.payload as { action: 'open' | 'call'; sessionId: string; n?: number; ticket: string }
+        // For an opening, the receipt's reference is its transaction.
+        const reference = Receipt.fromResponse(r.withReceipt(new Response(null))).reference
+        const { response, record, call } = await sessionCall(svc, req, payload, payload.action === 'open' ? reference : undefined)
+        return withSessionReceipt(r.withReceipt(response), record, call)
+      }
 
       // The hold transaction: the receipt's reference (for a sponsored hold, known only now).
       const holdTx = Receipt.fromResponse(r.withReceipt(new Response(null))).reference
@@ -473,8 +764,9 @@ export async function createGateway(deps: GatewayDeps) {
           predicateHash: s.predicateHash,
           escrow: chain.escrow,
           network: deps.config.network,
+          sessions: sessions ? { contract: chain.sessionContract, batchSize: sessions.batchSize, maxCalls: sessions.maxCalls, maxDuration: sessions.maxDurationSeconds } : null,
           pay: {
-            mpp: ['fermata', ...(s.unprotected && chargeHandler ? ['stellar (unprotected)'] : [])],
+            mpp: ['fermata', ...(sessions ? ['fermata session'] : []), ...(s.unprotected && chargeHandler ? ['stellar (unprotected)'] : [])],
             x402: [...(deps.x402?.fermata ? ['fermata'] : []), ...(exactRequirements(s) ? ['exact (unprotected)'] : [])],
           },
           unprotected: s.unprotected ?? null,
@@ -561,6 +853,7 @@ export async function createGateway(deps: GatewayDeps) {
       network: deps.config.network,
       networkPassphrase: chain.networkPassphrase,
       escrow: chain.escrow,
+      sessionContract: chain.sessionContract ?? null,
       explorer: deps.config.explorer ?? null,
       services: services.size,
       verifier: signerKey,
@@ -577,6 +870,51 @@ export async function createGateway(deps: GatewayDeps) {
   })
 
   const tokenOf = (serviceId: Hex) => services.get(serviceId)?.token
+
+  if (sessions) {
+    let sessionsIndexedAt = 0
+    const freshSessionEvents = async (): Promise<readonly IndexedEvent[]> => {
+      if (!sessions.indexer) return []
+      if (Date.now() - sessionsIndexedAt > 2_000) {
+        sessionsIndexedAt = Date.now()
+        await sessions.indexer.poll().catch((e) => log(`session indexer: ${(e as Error).message}`))
+      }
+      return sessions.indexer.events
+    }
+    const sessionOpts = async () => ({
+      tokenOf,
+      payoutOf: (serviceId: Hex) => services.get(serviceId)?.payout,
+      treasury: await chain.treasury().catch(() => undefined),
+    })
+
+    app.get('/sessions', async (c) => c.json(await sessions.store.list()))
+    app.get('/sessions/:sessionId', async (c) => {
+      const record = await sessions.store.get(c.req.param('sessionId')).catch(() => undefined)
+      return record ? c.json(record) : c.json({ error: 'unknown session' }, 404)
+    })
+    /** An accountant's view of one session: its events and transfers checked against each other and the gateway's record. */
+    app.get('/sessions/:sessionId/reconcile', async (c) => {
+      const id = c.req.param('sessionId').replace(/^0x/, '').toLowerCase()
+      if (!/^[0-9a-f]{64}$/.test(id)) return c.json({ error: 'session id: 64 hex characters' }, 400)
+      const record = await sessions.store.get(id)
+      const r = reconcileSession(await freshSessionEvents(), id, chain.sessionContract!, await sessionOpts())
+      if (r.status === 'unknown' && !record) return c.json({ error: 'unknown session' }, 404)
+      const recordMatches = !record || (record.settled === r.settled && (record.status === 'closed') === (r.status === 'closed'))
+      return c.json(plain({ ...r, record: record ? { status: record.status, settled: record.settled, batches: record.batches.length } : null, recordMatches, ok: r.ok && recordMatches }))
+    })
+    // Before `/reconcile/:callId`, which would take `sessions` for a call id.
+    /** Every indexed session, and per token the contract's balance against the open sessions' deposits. */
+    app.get('/reconcile/sessions', async (c) => {
+      const events = await freshSessionEvents()
+      const tokens = [...new Set(events.filter((e) => e.name === 'transfer').map((e) => (e as { token: string }).token))]
+      const onchain: Record<string, bigint> = {}
+      for (const t of tokens) onchain[t] = await chain.balance(t, chain.sessionContract!)
+      const complete = (sessions.indexer?.gaps.length ?? 1) === 0
+      const r = reconcileSessions(events, chain.sessionContract!, complete ? onchain : {}, await sessionOpts())
+      return c.json(plain({ ...r, complete, note: complete ? null : 'the index does not start at the session contract’s deployment, so balances are not compared' }))
+    })
+  }
+
 
   /** An accountant's view of one call: its escrow events and token transfers, checked against each other. */
   app.get('/reconcile/:callId', async (c) => {
@@ -677,6 +1015,11 @@ export async function createGateway(deps: GatewayDeps) {
   async function sweepOnce() {
     const now = await chain.now()
     const done: string[] = []
+    if (sessions) {
+      for (const { sessionId, status } of await sessions.store.list()) {
+        if (status !== 'closed') await settleSession(sessionId)
+      }
+    }
     for (const { callId } of await store.list()) {
       // Read each record again when its turn comes: the list is a snapshot, and a request may have
       // moved the call on since. Calls a request is still handling are left to it.
@@ -717,5 +1060,5 @@ export async function createGateway(deps: GatewayDeps) {
     return done
   }
 
-  return { app, services, sweep, mppx }
+  return { app, services, sweep, mppx, settleSession }
 }

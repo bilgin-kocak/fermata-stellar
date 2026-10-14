@@ -6,6 +6,7 @@
 // Stellar: the network (CAIP-2 and passphrase), the RPC URL and the escrow `C…` instead of a chain
 // and an address; the unprotected fallback pays the vendor's account (`G…`) through Stellar's MPP
 // Charge or x402 `exact` instead of `tempo`; where events are indexed; and OpenZeppelin's services.
+// New: the session contract and the gateway's limits for sessions.
 // Secrets never live in the file: they come from the environment (see main.ts).
 import { readFileSync } from 'node:fs'
 import { NETWORK_PASSPHRASES, networkPassphrase, type Hex } from 'fermata-stellar-sdk'
@@ -58,6 +59,20 @@ export type GatewayConfig = {
   /** Block explorer for links (stellar.expert on testnet; none on a local network). */
   explorer?: string | null
   services: ServiceConfig[]
+  /** The session contract (`C…`): with it the gateway also takes sessions (docs/session-escrow.md). */
+  sessionContract?: string
+  sessions: {
+    /** B, the calls per batch; `open_session` must use it. */
+    batchSize: number
+    /** The most calls one session may hold a deposit for. */
+    maxCalls: number
+    /** The longest a session may take calls, in seconds. */
+    maxDurationSeconds: number
+    storageDir: string
+    indexDir: string
+    /** First ledger the session indexer reads (the session contract's deployment ledger). */
+    startLedger?: number
+  }
 }
 
 const RPC_DEFAULTS: Record<string, string> = {
@@ -87,6 +102,15 @@ export function loadConfig(path = process.env.GATEWAY_CONFIG ?? 'gateway.config.
     exactFacilitatorUrl: env.X402_FACILITATOR_URL ?? file.exactFacilitatorUrl,
     explorer: null,
     services: file.services ?? [],
+    sessionContract: env.FERMATA_SESSION_CONTRACT ?? file.sessionContract,
+    sessions: {
+      batchSize: Number(env.GATEWAY_SESSION_BATCH ?? file.sessions?.batchSize ?? 10),
+      maxCalls: Number(env.GATEWAY_SESSION_MAX_CALLS ?? file.sessions?.maxCalls ?? 100),
+      maxDurationSeconds: Number(env.GATEWAY_SESSION_MAX_SECONDS ?? file.sessions?.maxDurationSeconds ?? 3_600),
+      storageDir: env.GATEWAY_SESSION_STORAGE ?? file.sessions?.storageDir ?? 'storage/sessions',
+      indexDir: env.GATEWAY_SESSION_INDEX ?? file.sessions?.indexDir ?? 'storage/session-index',
+      startLedger: env.GATEWAY_SESSION_START_LEDGER ? Number(env.GATEWAY_SESSION_START_LEDGER) : file.sessions?.startLedger,
+    },
   }
   // stellar.expert only for the real testnet: a local network with testnet's passphrase has no explorer.
   const realTestnet = cfg.networkPassphrase === NETWORK_PASSPHRASES.testnet && !/\/\/(localhost|127\.0\.0\.1)[:/]/.test(cfg.rpcUrl)
@@ -94,6 +118,16 @@ export function loadConfig(path = process.env.GATEWAY_CONFIG ?? 'gateway.config.
   if (!/^C[A-Z2-7]{55}$/.test(cfg.escrow)) throw new Error('escrow contract missing or malformed (FERMATA_ESCROW or config.escrow)')
   if (!cfg.rpcUrl) throw new Error('no RPC URL for this network (STELLAR_RPC_URL or config.rpcUrl)')
   if (cfg.services.length === 0) throw new Error('no services configured')
+  if (cfg.sessionContract !== undefined) {
+    if (!/^C[A-Z2-7]{55}$/.test(cfg.sessionContract)) throw new Error('session contract malformed (FERMATA_SESSION_CONTRACT or config.sessionContract)')
+    const { batchSize, maxCalls, maxDurationSeconds } = cfg.sessions
+    // The session contract's own limits (contracts/session): B ≤ 1,000, at most 1,000,000 calls and 30 days.
+    if (!Number.isInteger(batchSize) || batchSize < 1 || batchSize > 1_000) throw new Error('sessions.batchSize must be 1 to 1,000')
+    if (!Number.isInteger(maxCalls) || maxCalls < 1 || maxCalls > 1_000_000) throw new Error('sessions.maxCalls must be 1 to 1,000,000')
+    if (!Number.isInteger(maxDurationSeconds) || maxDurationSeconds < 60 || maxDurationSeconds > 30 * 86_400) {
+      throw new Error('sessions.maxDurationSeconds must be 60 s to 30 days')
+    }
+  }
   for (const s of cfg.services) {
     // The prover hides only these headers' values from the presentation (prove.rs).
     if (s.upstreamAuth && !['authorization', 'cookie', 'proxy-authorization'].includes(s.upstreamAuth.header.toLowerCase())) {

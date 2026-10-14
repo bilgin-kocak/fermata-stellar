@@ -22,11 +22,21 @@ import { createEd25519Signer } from '@x402/stellar'
 import { ExactStellarScheme } from '@x402/stellar/exact/facilitator'
 import { Store } from 'mppx/server'
 import { fetch as undiciFetch } from 'undici'
-import { EscrowIndexer, EscrowReader, FermataX402Facilitator, Relayer, fermataServer, rpcServer } from 'fermata-stellar-sdk'
-import { createGateway, type X402Facilitator } from './app.ts'
+import {
+  EscrowIndexer,
+  EscrowReader,
+  FermataX402Facilitator,
+  Relayer,
+  SessionReader,
+  fermataServer,
+  fermataSessionServer,
+  rpcServer,
+} from 'fermata-stellar-sdk'
+import { createGateway, type GatewayDeps, type X402Facilitator } from './app.ts'
 import { HttpAttestor } from './attestor.ts'
 import { SorobanGatewayChain } from './chain.ts'
 import { loadConfig } from './config.ts'
+import { SessionStore, openingRecord, viewOf } from './sessions.ts'
 import { CallStore } from './store.ts'
 import { parseResolve, upstreamDispatcher } from './upstream.ts'
 
@@ -112,6 +122,54 @@ mkdirSync(config.indexDir, { recursive: true })
 const indexer = new EscrowIndexer({ rpcUrl: config.rpcUrl, escrow: config.escrow, startLedger: config.startLedger, dir: config.indexDir })
 await indexer.load()
 
+// Sessions (docs/session-escrow.md, phase 1), when a session contract is configured.
+let sessions: GatewayDeps['sessions']
+let sessionReader: SessionReader | undefined
+let sessionIndexer: EscrowIndexer | undefined
+if (config.sessionContract) {
+  sessionReader = new SessionReader(config.sessionContract, config.rpcUrl, config.networkPassphrase)
+  const reads = await sessionReader.escrow()
+  if (reads !== config.escrow) throw new Error(`session contract ${config.sessionContract} reads escrow ${reads}, not ${config.escrow}`)
+  const sessionStore = new SessionStore(config.sessions.storageDir)
+  const handler = fermataSessionServer({
+    rpcUrl: config.rpcUrl,
+    network: config.network,
+    networkPassphrase: config.networkPassphrase,
+    escrow: config.escrow,
+    sessionContract: config.sessionContract,
+    secretKey,
+    relayer,
+    channels,
+    lookup: async (id) => {
+      const r = await sessionStore.get(id)
+      return r ? viewOf(r) : undefined
+    },
+    // Recorded before submission, so the sweeper finds the session even if the outcome is lost.
+    onOpen: async (opened) => {
+      await sessionStore.put(openingRecord(opened))
+    },
+  })
+  const tokens = (await Promise.all(config.services.map((s) => reader.service(s.serviceId)))).map((s) => s?.token).filter((t): t is string => !!t)
+  mkdirSync(config.sessions.indexDir, { recursive: true })
+  sessionIndexer = new EscrowIndexer({
+    rpcUrl: config.rpcUrl,
+    escrow: config.sessionContract,
+    kind: 'session',
+    tokens: [...new Set(tokens)],
+    startLedger: config.sessions.startLedger,
+    dir: config.sessions.indexDir,
+  })
+  await sessionIndexer.load()
+  sessions = {
+    handler,
+    store: sessionStore,
+    batchSize: config.sessions.batchSize,
+    maxCalls: config.sessions.maxCalls,
+    maxDurationSeconds: config.sessions.maxDurationSeconds,
+    indexer: sessionIndexer,
+  }
+}
+
 const dispatcher = upstreamDispatcher(
   parseResolve(process.env.GATEWAY_RESOLVE),
   process.env.GATEWAY_UPSTREAM_CA ? readFileSync(process.env.GATEWAY_UPSTREAM_CA) : undefined,
@@ -119,7 +177,7 @@ const dispatcher = upstreamDispatcher(
 
 const gateway = await createGateway({
   config,
-  chain: new SorobanGatewayChain(reader, relayer, config.network),
+  chain: new SorobanGatewayChain(reader, relayer, config.network, sessionReader),
   attestor: new HttpAttestor(config.attestorUrl),
   store,
   secretKey,
@@ -127,6 +185,7 @@ const gateway = await createGateway({
   chargeHandler,
   x402: { fermata: fermataFacilitator, exact: exactFacilitator },
   indexer,
+  sessions,
   fetchUpstream: async (url, init) => (await undiciFetch(url, { ...(init as object), dispatcher })) as unknown as Response,
   dashboardDir: process.env.GATEWAY_DASHBOARD_DIR ?? new URL('../../dashboard/dist', import.meta.url).pathname,
   verifierFiles: { caPath: process.env.GATEWAY_UPSTREAM_CA, predicateDirs: [new URL('../../../predicates', import.meta.url).pathname] },
@@ -139,11 +198,16 @@ const loop = (name: string, everyMs: number, run: () => Promise<unknown>) =>
 loop('sweep', config.sweepIntervalMs, gateway.sweep)
 loop('indexer', config.indexIntervalMs, () => indexer.poll())
 indexer.poll().catch((e) => console.error(`[gateway] indexer: ${(e as Error).message}`))
+if (sessionIndexer) {
+  loop('session indexer', config.indexIntervalMs, () => sessionIndexer.poll())
+  sessionIndexer.poll().catch((e) => console.error(`[gateway] session indexer: ${(e as Error).message}`))
+}
 
 serve({ fetch: gateway.app.fetch, port: config.port, hostname: config.host }, () => {
   console.log(
     `[gateway] listening on http://${config.host}:${config.port}: escrow ${config.escrow} (${config.network}), relayer ${relayer.address}, ` +
       `${gateway.services.size} service(s), attestor ${config.attestorUrl}, holds via ${channels ? 'OpenZeppelin Channels' : 'the relayer'}, ` +
-      `x402 exact via ${config.exactFacilitatorUrl ?? (exactFacilitator ? 'this process' : 'none')}`,
+      `x402 exact via ${config.exactFacilitatorUrl ?? (exactFacilitator ? 'this process' : 'none')}, ` +
+      `sessions ${config.sessionContract ? `on ${config.sessionContract} (B = ${config.sessions.batchSize})` : 'off'}`,
   )
 })

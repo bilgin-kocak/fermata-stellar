@@ -15,29 +15,39 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { Challenge, Credential, Errors, Method, Receipt, Store } from 'mppx'
 import { Mppx } from 'mppx/client'
+import { Keypair } from '@stellar/stellar-sdk'
 import { decodePaymentRequiredHeader, decodePaymentResponseHeader, encodePaymentSignatureHeader } from '@x402/core/http'
 import type { PaymentPayload, PaymentRequirements } from '@x402/core/types'
 import { beforeEach, describe, expect, it } from 'vitest'
 import {
   HoldStatus,
+  SessionStatus,
   accountAddress,
+  chainNext,
   contractAddress,
   fermataMethod,
   fermataServer,
+  fermataSessionMethod,
+  fermataSessionServer,
   holdTermsOf,
   originHash,
   requestHash,
+  signTicket,
   toHex,
+  verifyTicket,
   type Hex,
   type HoldInfo,
   type IndexedEvent,
   type ServiceInfo,
+  type SessionBatch,
+  type SessionInfo,
   type Verdict,
 } from 'fermata-stellar-sdk'
 import { createGateway, toDecimal, type EventSource, type X402Facilitator } from '../src/app.ts'
-import type { AttestInput, AttestResult, Attestor } from '../src/attestor.ts'
+import type { AttestInput, AttestResult, Attestor, SessionCallInput, SessionCallResult, SessionEntry } from '../src/attestor.ts'
 import type { GatewayChain, TxResult } from '../src/chain.ts'
 import type { GatewayConfig } from '../src/config.ts'
+import { SessionStore, openingRecord, viewOf } from '../src/sessions.ts'
 import { CallStore, type CallRecord } from '../src/store.ts'
 
 const h = (s: string) => toHex(new TextEncoder().encode(s.padEnd(32, '.').slice(0, 32)))
@@ -55,6 +65,8 @@ const PASSPHRASE = 'Test SDF Network ; September 2015'
 const QUOTE = `/s/${sid}/v1/quote?symbol=BTC-USD`
 
 type Hold = { status: HoldStatus; deadline: bigint; agent: string; serviceId: Hex; requestHash: Hex }
+const sessionContract = contractAddress(new Uint8Array(32).fill(0x5e))
+type OnchainSession = { status: SessionStatus; settled: number; deadline: bigint; maxCalls: number; ticketKey: Hex; batchSize: number }
 
 class FakeChain implements GatewayChain {
   network = 'stellar:testnet'
@@ -130,6 +142,82 @@ class FakeChain implements GatewayChain {
   async balance() {
     return 0n
   }
+
+  // Sessions: the session contract's state, and its events as its indexer would read them.
+  /** Set by `build`: the gateway sees a session contract only when sessions are enabled. */
+  sessionContract?: string
+  sessions = new Map<string, OnchainSession>()
+  batches: { sessionId: Hex; from: number; to: number; results: number[] }[] = []
+  closes: Hex[] = []
+  sessionEvents: IndexedEvent[] = []
+  openFails = false
+  /** An opening landing, with its deposit. */
+  openSession(sessionId: Hex, maxCalls: number, expiresAt: bigint, ticketKey: Hex, batchSize: number) {
+    this.sessions.set(sessionId, { status: SessionStatus.Open, settled: 0, deadline: expiresAt + 120n, maxCalls, ticketKey, batchSize })
+    const p = this.pos(`open ${sessionId}`)
+    const deposit = 10_000n * BigInt(maxCalls)
+    this.sessionEvents.push(
+      { name: 'session_opened', sessionId, serviceId: sid, agent, deposit, maxCalls, price: 10_000n, sampleK: 1, batchSize, deadline: expiresAt + 120n, ...p },
+      { name: 'transfer', token, from: agent, to: sessionContract, amount: deposit, ...p, id: `${p.id}a` },
+    )
+    return p.txHash
+  }
+  async session(sessionId: Hex): Promise<SessionInfo | undefined> {
+    const s = this.sessions.get(sessionId)
+    if (!s) return undefined
+    return {
+      sessionId, agent, serviceId: sid, token, payout: vendor, price: 10_000n, feeBps: 50, verifier: signerKey, predicateHash: '44'.repeat(32),
+      ticketKey: s.ticketKey, maxCalls: s.maxCalls, sampleK: 1, batchSize: s.batchSize, openedAt: 1_000n, deadline: s.deadline,
+      settled: s.settled, chain: sessionId, seed: '00'.repeat(32), status: s.status,
+    }
+  }
+  async settleBatch(b: SessionBatch): Promise<TxResult> {
+    const s = this.sessions.get(b.sessionId)!
+    if (s.status !== SessionStatus.Open) return { ok: false, error: 'NotOpen (#204)' }
+    if (this.time > s.deadline) return { ok: false, error: 'WindowClosed (#205)' }
+    const from = s.settled
+    if (b.to - from !== b.entries.length || b.to - from > s.batchSize) return { ok: false, error: 'InvalidBatch (#207)' }
+    const results = b.entries.map((e) => e.result)
+    this.batches.push({ sessionId: b.sessionId, from, to: b.to, results })
+    s.settled = b.to
+    const paid = results.filter((r) => r === 1).length
+    const refund = BigInt(results.length - paid) * 10_000n
+    // h() keeps 32 characters: the batch number goes first so each batch has its own transaction.
+    const p = this.pos(`batch ${b.to} ${b.sessionId}`)
+    const rest = b.to === s.maxCalls ? 0n : undefined
+    this.sessionEvents.push({
+      name: 'batch_settled', sessionId: b.sessionId, serviceId: sid, from, to: b.to, delivered: paid, failed: results.filter((r) => r === 2).length,
+      answered: 0, unanswered: results.filter((r) => r === 4).length, paid, payoutAmount: BigInt(paid) * 9_950n, fee: BigInt(paid) * 50n, refund,
+      chain: h(`chain ${b.to}`), entriesHash: h(`entries ${b.to}`), ...p,
+    })
+    if (paid) {
+      this.sessionEvents.push(
+        { name: 'transfer', token, from: sessionContract, to: vendor, amount: BigInt(paid) * 9_950n, ...p, id: `${p.id}a` },
+        { name: 'transfer', token, from: sessionContract, to: treasury, amount: BigInt(paid) * 50n, ...p, id: `${p.id}b` },
+      )
+    }
+    if (refund) this.sessionEvents.push({ name: 'transfer', token, from: sessionContract, to: agent, amount: refund, ...p, id: `${p.id}c` })
+    if (rest !== undefined) {
+      s.status = SessionStatus.Closed
+      this.sessionEvents.push({ name: 'session_closed', sessionId: b.sessionId, serviceId: sid, agent, refund: rest, ...p, id: `${p.id}z` })
+    }
+    return { ok: true, txHash: p.txHash }
+  }
+  async closeSession(sessionId: Hex): Promise<TxResult> {
+    const s = this.sessions.get(sessionId)!
+    if (s.status !== SessionStatus.Open) return { ok: false, error: 'NotOpen (#204)' }
+    if (this.time <= s.deadline) return { ok: false, error: 'WindowOpen (#206)' }
+    s.status = SessionStatus.Closed
+    this.closes.push(sessionId)
+    const refund = BigInt(s.maxCalls - s.settled) * 10_000n
+    const p = this.pos(`close ${sessionId}`)
+    this.sessionEvents.push({ name: 'session_closed', sessionId, serviceId: sid, agent, refund, ...p })
+    if (refund) this.sessionEvents.push({ name: 'transfer', token, from: sessionContract, to: agent, amount: refund, ...p, id: `${p.id}a` })
+    return { ok: true, txHash: p.txHash }
+  }
+  async treasury() {
+    return treasury
+  }
 }
 
 class FakeAttestor implements Attestor {
@@ -140,7 +228,7 @@ class FakeAttestor implements Attestor {
     return this.next(input)
   }
   async health() {
-    return { network: PASSPHRASE, escrow, signer: accountAddress(new Uint8Array(32).fill(0x51)), signerKey }
+    return { network: PASSPHRASE, escrow, signer: accountAddress(new Uint8Array(32).fill(0x51)), signerKey, sessionContract: this.sessionContract }
   }
   async reverify(input: { callId: Hex }) {
     return {
@@ -151,7 +239,59 @@ class FakeAttestor implements Attestor {
   async presentation(callId: Hex) {
     return /^[0-9a-f]{64}$/.test(callId) ? new Uint8Array([1, 2, 3]) : undefined
   }
+
+  // Sessions: a book of the calls it recorded, as the real attestor keeps one.
+  sessionContract: string | null = null
+  sessionCalls: SessionCallInput[] = []
+  unansweredCalls: SessionCallInput[] = []
+  unreachable = false
+  sessionNext: (i: SessionCallInput) => SessionCallResult = (i) => sessionEntry(i, 1)
+  book = new Map<string, { n: number; entry: SessionEntry; ticket: Hex }[]>()
+  chain?: FakeChain
+  private record(i: SessionCallInput, entry: SessionEntry) {
+    const calls = this.book.get(i.sessionId) ?? []
+    this.book.set(i.sessionId, [...calls.filter((c) => c.n !== i.n), { n: i.n, entry, ticket: i.ticket }])
+  }
+  async sessionAttest(i: SessionCallInput): Promise<SessionCallResult> {
+    this.sessionCalls.push(i)
+    if (this.unreachable) return { kind: 'unreachable', detail: 'attestor unreachable: connection refused' }
+    const r = this.sessionNext(i)
+    if (r.kind === 'entry') this.record(i, r.entry)
+    if (r.kind === 'unanswered') this.record(i, { result: 4, presentation_hash: '00'.repeat(32), response_hash: '00'.repeat(32) })
+    return r
+  }
+  async sessionUnanswered(i: SessionCallInput): Promise<SessionCallResult> {
+    this.unansweredCalls.push(i)
+    if (this.unreachable) return { kind: 'unreachable', detail: 'attestor unreachable: connection refused' }
+    this.record(i, { result: 4, presentation_hash: '00'.repeat(32), response_hash: '00'.repeat(32) })
+    return { kind: 'unanswered', n: i.n, chain: '', detail: 'recorded unanswered' }
+  }
+  async sessionStatement({ sessionId, to }: { sessionId: Hex; to: number }) {
+    const from = this.chain!.sessions.get(sessionId)!.settled
+    const calls = (this.book.get(sessionId) ?? []).filter((c) => c.n > from && c.n <= to).sort((a, b) => a.n - b.n)
+    if (calls.length !== to - from) return { ok: false as const, status: 409, detail: `calls ${from + 1}-${to} are not all in the book` }
+    return {
+      ok: true as const,
+      signed: {
+        statement: {}, message: 'ab'.repeat(288), signature: 'cd'.repeat(64), from, to,
+        requestHashes: calls.map((c) => h(`request ${c.n}`)), entries: calls.map((c) => c.entry), ticket: calls.at(-1)!.ticket, signer: 'G',
+      },
+    }
+  }
 }
+
+/** The attestor proved call n of a session: `result` 1 (DELIVERED) or 2 (FAILED). */
+const sessionEntry = (i: SessionCallInput, result: 1 | 2): SessionCallResult => ({
+  kind: 'entry',
+  n: i.n,
+  chain: '',
+  entry: { result, presentation_hash: h(`presentation ${i.sessionId} ${i.n}`), response_hash: '66'.repeat(32) },
+  outcome: result === 1 ? 'DELIVERED' : 'FAILED',
+  failures: result === 1 ? [] : ['status 500 not in [200]'],
+  presentationHash: h(`presentation ${i.sessionId} ${i.n}`),
+  response: { status: result === 1 ? 200 : 500, headers: [['content-type', 'application/json']], bodyBase64: Buffer.from(result === 1 ? '{"price":1}' : '{"error":"boom"}').toString('base64') },
+  proveMs: 1000,
+})
 
 const verdict = (callId: Hex, outcome: 1 | 2, response: { status: number; body: string }): AttestResult => ({
   kind: 'verdict',
@@ -220,6 +360,7 @@ class FakeFermataFacilitator implements X402Facilitator {
 let chain: FakeChain
 let attestor: FakeAttestor
 let store: CallStore
+let sessionStore: SessionStore
 let gw: Awaited<ReturnType<typeof createGateway>>
 let lastCredential: string | undefined
 /** Runs where the real method submits a sponsored hold (the gateway records the call just before). */
@@ -228,6 +369,7 @@ let onBroadcast: ((callId: Hex, requestHash: Hex) => Promise<void>) | undefined
 const config = (over: Partial<GatewayConfig> = {}): GatewayConfig => ({
   port: 0, host: '127.0.0.1', realm: 'gw.test', network: 'stellar:testnet', networkPassphrase: PASSPHRASE, rpcUrl: 'http://unused', escrow,
   attestorUrl: 'http://unused', storageDir: '', indexDir: '', sweepIntervalMs: 1000, indexIntervalMs: 1000,
+  sessions: { batchSize: 10, maxCalls: 100, maxDurationSeconds: 3_600, storageDir: '', indexDir: '' },
   services: [{ serviceId: sid, upstream, examplePath: '/v1/quote?symbol=BTC-USD', upstreamAuth: { header: 'Authorization', env: 'VENDOR_TOKEN' } }],
   ...over,
 })
@@ -241,8 +383,14 @@ const indexer = (): EventSource => ({
   poll: async () => 0,
 })
 
-async function build(over: Partial<GatewayConfig> = {}, env: Record<string, string> = {}) {
+async function build(over: Partial<GatewayConfig> = {}, env: Record<string, string> = {}, withSessions?: { batchSize: number }) {
   store = new CallStore(mkdtempSync(path.join(tmpdir(), 'fermata-gw-')))
+  sessionStore = new SessionStore(mkdtempSync(path.join(tmpdir(), 'fermata-gw-sessions-')))
+  chain.sessionContract = withSessions ? sessionContract : undefined
+  if (withSessions) {
+    attestor.sessionContract = sessionContract
+    attestor.chain = chain
+  }
   return createGateway({
     config: { ...config(over), storageDir: store.dir },
     chain,
@@ -254,7 +402,106 @@ async function build(over: Partial<GatewayConfig> = {}, env: Record<string, stri
     indexer: indexer(),
     env: { VENDOR_TOKEN: 'Bearer vendor-secret', ...env },
     log: () => {},
+    ...(withSessions
+      ? {
+          sessions: {
+            handler: fakeSessionServer(chain, sessionStore),
+            store: sessionStore,
+            batchSize: withSessions.batchSize,
+            maxCalls: 50,
+            maxDurationSeconds: 3_600,
+            indexer: { get events() { return chain.sessionEvents }, gaps: [], latestLedger: 100, poll: async () => 0 },
+          },
+        }
+      : {}),
   })
+}
+
+/**
+ * The `session` intent with the real request and binding hooks, and the checks against the fake
+ * chain and the gateway's records; tickets are real Ed25519 signatures, checked as the real server
+ * does. An opening's "transaction" here is `signed-open:` and its terms as JSON.
+ */
+function fakeSessionServer(chain: FakeChain, sessions: SessionStore) {
+  const real = fermataSessionServer({
+    rpcUrl: 'http://127.0.0.1:1/unused', network: 'stellar:testnet', escrow, sessionContract, secretKey: SECRET, lookup: async () => undefined,
+  })
+  const claims = Store.memory()
+  const domain = { networkPassphrase: PASSPHRASE, contract: sessionContract }
+  const fail = (reason: string): never => {
+    throw new Errors.VerificationFailedError({ reason })
+  }
+  const termsOf = (transaction: string) => JSON.parse(transaction.replace(/^signed-open:/, '')) as { maxCalls: number; expiresAt: string; ticketKey: Hex }
+  return Method.toServer(fermataSessionMethod, {
+    request: (p) => ({ ...p.request, sponsored: true }),
+    stableBinding: real.stableBinding!,
+    async validate({ credential, request }) {
+      const c = credential.challenge.request
+      const p = credential.payload
+      if (p.action === 'open') {
+        const t = termsOf(p.transaction)
+        if (t.maxCalls > c.maxCalls) fail('too many calls')
+        if (!(await verifyTicket(t.ticketKey, domain, p.sessionId, 1, chainNext(p.sessionId, c.requestHash), p.ticket))) fail('the ticket for call 1 does not cover this request')
+      } else {
+        const r = await sessions.get(p.sessionId)
+        const view = r ? viewOf(r) : undefined
+        if (!view || !view.open) return fail('no open session with this id at this gateway')
+        if (view.serviceId !== c.serviceId) fail('the session is for another service')
+        if (p.n !== view.next) fail(`call ${p.n} is not the next call of the session (${view.next})`)
+        if (chain.time >= view.expiresAt) fail('the session has expired')
+        if (!(await verifyTicket(view.ticketKey, domain, p.sessionId, p.n, chainNext(view.chain, c.requestHash), p.ticket))) fail('the ticket does not cover this request')
+      }
+      return { challenge: credential.challenge, credential, details: {}, intent: 'session', method: 'fermata', request: request as never, source: credential.source }
+    },
+    async broadcast({ credential }) {
+      const p = credential.payload
+      const key = p.action === 'open' ? `open:${p.sessionId}` : `call:${p.sessionId}:${p.n}`
+      if (!(await Store.tryClaim(claims as never, key, Date.now() + 3_600_000))) fail('this credential was already used')
+      if (p.action === 'call') return { method: 'fermata', reference: `${p.sessionId}:${p.n}`, status: 'success', timestamp: new Date().toISOString() }
+      const t = termsOf(p.transaction)
+      const c = credential.challenge.request
+      await sessions.put(
+        openingRecord({ sessionId: p.sessionId, serviceId: c.serviceId, agent, ticketKey: t.ticketKey, maxCalls: t.maxCalls, batchSize: c.batchSize, expiresAt: BigInt(t.expiresAt), deposit: 10_000n * BigInt(t.maxCalls) }),
+      )
+      if (chain.openFails) fail('open_session was not submitted: txBadSeq')
+      const txHash = chain.openSession(p.sessionId, t.maxCalls, BigInt(t.expiresAt), t.ticketKey, c.batchSize)
+      return { method: 'fermata', reference: txHash, status: 'success', timestamp: new Date().toISOString() }
+    },
+  })
+}
+
+/** An agent paying with the `session` intent: it opens a session, then signs one ticket per call. */
+function sessionAgent(opts: { maxCalls?: number; seconds?: number } = {}) {
+  const seed = new Uint8Array(32).fill(0x7c)
+  const ticketKey = toHex(Keypair.fromRawEd25519Seed(Buffer.from(seed)).rawPublicKey())
+  const agentState: { sessionId?: Hex; chains: Hex[]; next: number; challenges: Record<string, unknown>[] } = { chains: [], next: 1, challenges: [] }
+  const method = Method.toClient(fermataSessionMethod, {
+    async createCredential({ challenge }) {
+      const r = challenge.request
+      agentState.challenges.push(r)
+      const domain = { networkPassphrase: PASSPHRASE, contract: r.sessionContract }
+      if (!agentState.sessionId) {
+        const sessionId = toHex(crypto.getRandomValues(new Uint8Array(32)))
+        const chain1 = chainNext(sessionId, r.requestHash)
+        Object.assign(agentState, { sessionId, chains: [sessionId, chain1], next: 2 })
+        const terms = { maxCalls: opts.maxCalls ?? 5, expiresAt: String(chain.time + BigInt(opts.seconds ?? 600)), ticketKey }
+        const ticket = await signTicket(seed, domain, sessionId, 1, chain1)
+        return Credential.serialize({ challenge, payload: { action: 'open', transaction: `signed-open:${JSON.stringify(terms)}`, sessionId, ticket } })
+      }
+      const n = agentState.next
+      const c = chainNext(agentState.chains[n - 1]!, r.requestHash)
+      agentState.chains[n] = c
+      agentState.next = n + 1
+      const ticket = await signTicket(seed, domain, agentState.sessionId, n, c)
+      return Credential.serialize({ challenge, payload: { action: 'call', sessionId: agentState.sessionId, n, ticket } })
+    },
+  })
+  const m = Mppx.create({ methods: [method], polyfill: false, fetch: ((url: string, init: RequestInit) => gw.app.request(url, init)) as never })
+  return {
+    fetch: (p: string, init?: RequestInit) =>
+      m.fetch(`${BASE}${p}`, { ...init, headers: { ...(init?.headers as Record<string, string>), ...(agentState.sessionId ? { 'x-fermata-session': agentState.sessionId } : {}) } }),
+    state: agentState,
+  }
 }
 
 /** The agent's `fermata` method: the hold lands on the fake chain. */
@@ -625,5 +872,177 @@ describe('gateway, unprotected fallback', () => {
 
   it('formats base units for the Charge offer', () => {
     expect([toDecimal(100_000n), toDecimal(10_000_000n), toDecimal(1n), toDecimal(0n)]).toEqual(['0.01', '1', '0.0000001', '0'])
+  })
+})
+
+describe('gateway, sessions', () => {
+  const B = 2
+  beforeEach(async () => {
+    gw = await build({}, {}, { batchSize: B })
+  })
+  const QUOTE_ETH = `/s/${sid}/v1/quote?symbol=ETH-USD`
+  const QUOTE_SOL = `/s/${sid}/v1/quote?symbol=SOL-USD`
+
+  it('offers the session intent beside the hold, with the session contract and the gateway’s limits', async () => {
+    const res = await gw.app.request(`${BASE}${QUOTE}`)
+    expect(res.status).toBe(402)
+    const challenges = Challenge.fromResponseList(res)
+    expect(challenges.map((c) => `${c.method}/${c.intent}`)).toEqual(['fermata/charge', 'fermata/session'])
+    const s = challenges[1]!.request as Record<string, unknown>
+    expect(s).toMatchObject({
+      amount: '10000', currency: token, escrow, sessionContract, network: 'stellar:testnet', serviceId: sid,
+      requestHash: requestHash(sid, 'GET', '/v1/quote?symbol=BTC-USD'), batchSize: B, maxCalls: 50, maxDuration: 3_600, sponsored: true,
+    })
+    expect(s.sessionId).toBeUndefined()
+    const services = (await (await gw.app.request(`${BASE}/services`)).json()) as Record<string, any>[]
+    expect(services[0]!.pay.mpp).toEqual(['fermata', 'fermata session'])
+    expect(services[0]!.sessions).toMatchObject({ contract: sessionContract, batchSize: B })
+  })
+
+  it('opens a session on the first call, proves every call with its ticket, and settles every B calls', async () => {
+    const a = sessionAgent({ maxCalls: 5 })
+    attestor.sessionNext = (i) => sessionEntry(i, i.n === 2 ? 2 : 1)
+    const first = await a.fetch(QUOTE, { headers: { accept: 'application/json' } })
+    expect(first.status).toBe(200)
+    expect(await first.json()).toEqual({ price: 1 })
+    const sessionId = a.state.sessionId!
+    expect(receiptOf(first)).toMatchObject({ method: 'fermata', sessionId, n: 1, outcome: 'DELIVERED' })
+    expect(first.headers.get('x-fermata-open-tx')).toBe(h(`open ${sessionId}`))
+    expect(chain.sessions.get(sessionId)).toMatchObject({ status: SessionStatus.Open, maxCalls: 5 })
+
+    const second = await a.fetch(QUOTE_ETH)
+    expect(second.status).toBe(500) // the vendor's proved answer
+    expect(receiptOf(second)).toMatchObject({ sessionId, n: 2, outcome: 'FAILED' })
+    // Two recorded calls make a batch: settled at once.
+    await gw.settleSession(sessionId)
+    expect(chain.batches).toEqual([{ sessionId, from: 0, to: 2, results: [1, 2] }])
+    // The attestor saw each call with its ticket, in order, and the gateway's credentials.
+    expect(attestor.sessionCalls.map((c) => [c.n, c.url, c.headers.authorization])).toEqual([
+      [1, `${upstream}/v1/quote?symbol=BTC-USD`, 'Bearer vendor-secret'],
+      [2, `${upstream}/v1/quote?symbol=ETH-USD`, 'Bearer vendor-secret'],
+    ])
+    const record = await sessionStore.get(sessionId)
+    expect(record).toMatchObject({ status: 'open', settled: 2, maxCalls: 5 })
+    expect(record!.calls.map((c) => [c.n, c.status, c.outcome])).toEqual([
+      [1, 'recorded', 'DELIVERED'],
+      [2, 'recorded', 'FAILED'],
+    ])
+    // chain(2) as the agent computed it.
+    expect(record!.calls[1]!.chain).toBe(a.state.chains[2])
+  })
+
+  it('names the call it expects next when the agent names its session', async () => {
+    const a = sessionAgent()
+    await a.fetch(QUOTE)
+    const res = await gw.app.request(`${BASE}${QUOTE_ETH}`, { headers: { 'x-fermata-session': a.state.sessionId! } })
+    const s = Challenge.fromResponseList(res).find((c) => c.intent === 'session')!.request as Record<string, unknown>
+    expect(s).toMatchObject({ sessionId: a.state.sessionId, next: 2, chain: a.state.chains[1] })
+  })
+
+  it('settles what is left after the expiry, and closes the session after its deadline', async () => {
+    const a = sessionAgent({ maxCalls: 5, seconds: 300 })
+    attestor.sessionNext = (i) => (i.n === 3 ? { kind: 'unanswered', n: 3, chain: '', detail: 'no-transcript: vendor silent' } : sessionEntry(i, 1))
+    for (const p of [QUOTE, QUOTE_ETH, QUOTE_SOL]) await a.fetch(p)
+    const sessionId = a.state.sessionId!
+    await gw.sweep()
+    expect(chain.batches.map((b) => [b.from, b.to])).toEqual([[0, 2]])
+    // After the expiry the last call settles alone; after the deadline the session closes.
+    chain.time += 301n
+    await gw.sweep()
+    expect(chain.batches.map((b) => [b.from, b.to, b.results])).toEqual([
+      [0, 2, [1, 1]],
+      [2, 3, [4]],
+    ])
+    expect(chain.closes).toEqual([])
+    chain.time += 121n
+    await gw.sweep()
+    expect(chain.closes).toEqual([sessionId])
+    expect(await sessionStore.get(sessionId)).toMatchObject({ status: 'closed', settled: 3, closeTx: h(`close ${sessionId}`) })
+    // Reconciled from the session contract's events: 2 calls paid, 1 refunded, 2 never made.
+    const r = (await (await gw.app.request(`${BASE}/sessions/${sessionId}/reconcile`)).json()) as Record<string, any>
+    expect(r).toMatchObject({ ok: true, status: 'closed', settled: 3, paidCalls: 2, remaining: '0', recordMatches: true })
+    const all = (await (await gw.app.request(`${BASE}/reconcile/sessions`)).json()) as Record<string, any>
+    expect(all).toMatchObject({ ok: true, sessions: { opened: 1, closed: 1, failing: [] } })
+  })
+
+  it('a session full after its last call is closed by its last batch', async () => {
+    const a = sessionAgent({ maxCalls: 3 })
+    for (const p of [QUOTE, QUOTE_ETH, QUOTE_SOL]) await a.fetch(p)
+    await gw.sweep()
+    expect(chain.batches.map((b) => [b.from, b.to])).toEqual([
+      [0, 2],
+      [2, 3],
+    ])
+    expect(chain.sessions.get(a.state.sessionId!)!.status).toBe(SessionStatus.Closed)
+    expect(await sessionStore.get(a.state.sessionId!)).toMatchObject({ status: 'closed', settled: 3 })
+    expect(chain.closes).toEqual([])
+  })
+
+  it('refuses a call out of order, a ticket over another request, and a replayed credential', async () => {
+    const a = sessionAgent()
+    await a.fetch(QUOTE)
+    const sessionId = a.state.sessionId!
+    // A ticket for call 2 signed over another request.
+    const res402 = await gw.app.request(`${BASE}${QUOTE_ETH}`)
+    const challenge = Challenge.fromResponseList(res402).find((c) => c.intent === 'session')!
+    const seed = new Uint8Array(32).fill(0x7c)
+    const domain = { networkPassphrase: PASSPHRASE, contract: sessionContract }
+    const other = chainNext(a.state.chains[1]!, requestHash(sid, 'GET', '/v1/quote?symbol=SOL-USD'))
+    const wrongTicket = await signTicket(seed, domain, sessionId, 2, other)
+    const pay = (payload: Record<string, unknown>) =>
+      gw.app.request(`${BASE}${QUOTE_ETH}`, { headers: { authorization: Credential.serialize({ challenge, payload } as never) } })
+    expect((await pay({ action: 'call', sessionId, n: 2, ticket: wrongTicket })).status).toBe(402)
+    // Call 3 before call 2.
+    const right3 = await signTicket(seed, domain, sessionId, 3, chainNext(a.state.chains[1]!, challenge.request.requestHash as string))
+    expect((await pay({ action: 'call', sessionId, n: 3, ticket: right3 })).status).toBe(402)
+    // The right ticket works once; replayed, it is refused.
+    const right2 = await signTicket(seed, domain, sessionId, 2, chainNext(a.state.chains[1]!, challenge.request.requestHash as string))
+    expect((await pay({ action: 'call', sessionId, n: 2, ticket: right2 })).status).toBe(200)
+    expect((await pay({ action: 'call', sessionId, n: 2, ticket: right2 })).status).toBe(402)
+    expect(attestor.sessionCalls.map((c) => c.n)).toEqual([1, 2])
+  })
+
+  it('a call the attestor did not record blocks the session until the sweeper records it unanswered', async () => {
+    const a = sessionAgent()
+    await a.fetch(QUOTE)
+    attestor.unreachable = true
+    const cut = await a.fetch(QUOTE_ETH)
+    expect(cut.status).toBe(504)
+    expect(receiptOf(cut)).toMatchObject({ n: 2, outcome: null })
+    const sessionId = a.state.sessionId!
+    expect((await sessionStore.get(sessionId))!.calls[1]).toMatchObject({ n: 2, status: 'unrecorded' })
+    // Call 3 is refused while call 2 is unrecorded.
+    attestor.unreachable = false
+    expect((await a.fetch(QUOTE_SOL)).status).toBe(402)
+    await gw.sweep()
+    expect(attestor.unansweredCalls.map((c) => [c.n, c.ticket])).toEqual([[2, (await sessionStore.get(sessionId))!.calls[1]!.ticket]])
+    expect((await sessionStore.get(sessionId))!.calls[1]).toMatchObject({ status: 'recorded', outcome: 'UNANSWERED' })
+    expect(chain.batches).toEqual([{ sessionId, from: 0, to: 2, results: [1, 4] }])
+  })
+
+  it('an opening that never landed is closed after 15 minutes', async () => {
+    chain.openFails = true
+    const a = sessionAgent()
+    const res = await a.fetch(QUOTE)
+    expect(res.status).toBe(402)
+    const sessionId = a.state.sessionId!
+    expect(await sessionStore.get(sessionId)).toMatchObject({ status: 'opening' })
+    await gw.sweep()
+    expect(await sessionStore.get(sessionId)).toMatchObject({ status: 'opening' })
+    const old = await sessionStore.get(sessionId)
+    await sessionStore.put({ ...old!, createdAt: new Date(Date.now() - 16 * 60_000).toISOString() })
+    await gw.sweep()
+    expect(await sessionStore.get(sessionId)).toMatchObject({ status: 'closed', error: 'open_session never landed' })
+  })
+
+  it('refuses to start when the attestor proves another session contract', async () => {
+    attestor.sessionContract = contractAddress(new Uint8Array(32).fill(0x77))
+    await expect(
+      createGateway({
+        config: { ...config(), storageDir: store.dir }, chain, attestor, store, secretKey: SECRET, fermataHandler: fakeFermataServer(chain),
+        sessions: { handler: fakeSessionServer(chain, sessionStore), store: sessionStore, batchSize: B, maxCalls: 50, maxDurationSeconds: 3_600 },
+        log: () => {},
+      }),
+    ).rejects.toThrow(/proves sessions of/)
   })
 })
