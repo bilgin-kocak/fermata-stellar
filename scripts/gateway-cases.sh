@@ -17,8 +17,12 @@
 # must reconcile as a whole.
 #
 #   NETWORK=local LOCAL_PASSPHRASE="Test SDF Network ; September 2015" scripts/gateway-cases.sh
-#   scripts/gateway-cases.sh                  # testnet (see README); OZ_CHANNELS_API_KEY and
-#                                             # X402_FACILITATOR_API_KEY route through OpenZeppelin
+#   scripts/gateway-cases.sh                  # testnet (see the README)
+#
+# The gateway reads its settings from this environment too: with OZ_CHANNELS_URL and
+# OZ_CHANNELS_API_KEY it submits the agents' holds through OpenZeppelin Channels instead of from the
+# relayer's account, and with X402_FACILITATOR_URL (and X402_FACILITATOR_API_KEY, if it needs one)
+# x402 `exact` goes through that facilitator instead of one in the gateway's process.
 #
 # Stellar's MPP Charge and x402 `exact` know only the testnet and mainnet passphrases, so on a local
 # network started with the standalone passphrase they are not offered (C1-C2 are skipped). Stellar's
@@ -98,6 +102,12 @@ wait_port() {
   die "nothing listening on port $1 (see ${LOGS#"$ROOT"/})"
 }
 api() { curl -sS --noproxy '*' "$@"; }
+# A process left on one of these ports (an earlier run, say) would answer in place of this run's.
+ports=("$OK_PORT" "$E500_PORT" "$HANG_PORT" "$NOTARY_PORT" "$ATTESTOR_PORT" "$GATEWAY_PORT")
+[ "$NETWORK" != local ] || ports+=("$RPC_TLS_PORT")
+for p in "${ports[@]}"; do
+  if (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null; then die "port $p is already in use; stop what listens there"; fi
+done
 
 log "escrow $ESCROW on $NETWORK ($CAIP2), price $PRICE, window ${WINDOW}s"
 log "starting the demo vendors, a notary and the attestor (logs in ${LOGS#"$ROOT"/})"
@@ -150,11 +160,12 @@ if [ "$NETWORK" = local ]; then
     -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" -keyout "$LOGS/rpc-tls.key" -out "$LOGS/rpc-tls.pem" 2>/dev/null
   node "$ROOT/scripts/lib/tls-proxy.mjs" "$RPC_TLS_PORT" "${RPC%/rpc}" "$LOGS/rpc-tls.key" "$LOGS/rpc-tls.pem" \
     >"$LOGS/rpc-tls.log" 2>&1 &
-  pids+=($!)
+  proxy=$!
+  pids+=("$proxy")
   # It prints its address once it listens; another process on the port would make it exit.
   for _ in $(seq 100); do
     grep -q ' -> ' "$LOGS/rpc-tls.log" && break
-    kill -0 "${pids[-1]}" 2>/dev/null || die "the RPC's TLS proxy did not start (see ${LOGS#"$ROOT"/}/rpc-tls.log)"
+    kill -0 "$proxy" 2>/dev/null || die "the RPC's TLS proxy did not start (see ${LOGS#"$ROOT"/}/rpc-tls.log)"
     sleep 0.1
   done
   GW_RPC="https://localhost:$RPC_TLS_PORT/rpc"
@@ -181,11 +192,12 @@ jq -n --arg network "$CAIP2" --arg passphrase "$PASSPHRASE" --arg rpc "$GW_RPC" 
 
 log "starting the gateway on $GATEWAY"
 resolve="vendor.fermata.test:$OK_PORT=127.0.0.1:$OK_PORT,vendor.fermata.test:$E500_PORT=127.0.0.1:$E500_PORT"
+# exec, so the recorded pid is tsx's (it passes the signal on to the gateway) and cleanup stops it.
 (cd "$GW" && GATEWAY_CONFIG="$LOGS/gateway.config.json" \
   FERMATA_RELAYER_SECRET="$(stellar keys secret "$(key relayer)")" \
   GATEWAY_SECRET_KEY="$(openssl rand -hex 32)" VENDOR_UPSTREAM_TOKEN="$SECRET" \
   GATEWAY_UPSTREAM_CA="$CA" GATEWAY_RESOLVE="$resolve" GATEWAY_SWEEP_MS=2000 GATEWAY_INDEX_MS=2000 \
-  "$TSX" src/main.ts >"$LOGS/gateway.log" 2>&1) &
+  exec "$TSX" src/main.ts >"$LOGS/gateway.log" 2>&1) &
 pids+=($!)
 wait_port "$GATEWAY_PORT"
 api "$GATEWAY/info" | jq -c . >&2

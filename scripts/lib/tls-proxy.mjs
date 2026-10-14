@@ -3,7 +3,7 @@
 // TARGET unchanged.
 //
 //   node scripts/lib/tls-proxy.mjs LISTEN_PORT TARGET KEY_PEM CERT_PEM
-//   node scripts/lib/tls-proxy.mjs 8001 http://127.0.0.1:8000 key.pem cert.pem
+//   node scripts/lib/tls-proxy.mjs 7443 http://127.0.0.1:8000 key.pem cert.pem
 import { readFileSync } from 'node:fs'
 import { request } from 'node:http'
 import { createServer } from 'node:https'
