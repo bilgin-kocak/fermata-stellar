@@ -9,17 +9,26 @@
 //
 // Tokens are learned from `service_registered` events. When a new one appears, its transfers are
 // read again from that ledger, so none in the same page is missed.
+//
+// The same indexer follows the session contract (`kind: 'session'`): its `session_opened`,
+// `batch_settled` and `session_closed` events and the transfers into and out of it. It learns no
+// tokens there (the session contract registers no services): give it the services' tokens.
 import { mkdir, readFile, appendFile, writeFile, rename } from 'node:fs/promises'
 import { join } from 'node:path'
 import { Address, rpc, xdr } from '@stellar/stellar-sdk'
 import { decodeEscrowEvent, decodeTransfer, type EscrowEvent, type EventPosition, type TransferEvent } from './events.ts'
+import { decodeSessionEvent, type SessionEventData } from './sessionTx.ts'
 import { rpcServer } from './soroban.ts'
 
-export type IndexedEvent = EscrowEvent | TransferEvent
+export type SessionEvent = SessionEventData & EventPosition
+export type IndexedEvent = EscrowEvent | TransferEvent | SessionEvent
 
 export type IndexerOptions = {
   rpcUrl: string
+  /** The contract to follow: the escrow, or with `kind: 'session'` the session contract. */
   escrow: string
+  /** Whose events the contract emits. Default `escrow`. */
+  kind?: 'escrow' | 'session'
   /** Tokens to follow from the start (more are learned from `service_registered`). */
   tokens?: readonly string[]
   /** First ledger to read (the escrow's deployment ledger). Default: the oldest the RPC has. */
@@ -164,7 +173,7 @@ export class EscrowIndexer {
     const pos: EventPosition = { ledger: e.ledger, txHash: e.txHash, id: e.id, ledgerClosedAt: e.ledgerClosedAt }
     try {
       if (contract === this.opts.escrow) {
-        const d = decodeEscrowEvent(e.topic, e.value)
+        const d = this.opts.kind === 'session' ? decodeSessionEvent(e.topic, e.value) : decodeEscrowEvent(e.topic, e.value)
         return d ? { ...d, ...pos } : undefined
       }
       const t = decodeTransfer(contract, e.topic, e.value)
@@ -212,7 +221,7 @@ export function caughtUp(res: { events: readonly unknown[]; cursor: string; late
   return res.events.length < limit && ledgerOfCursor(res.cursor) >= res.latestLedger
 }
 
-const BIGINT_FIELDS = new Set(['amount', 'fee', 'pricePerCall'])
+const BIGINT_FIELDS = new Set(['amount', 'fee', 'pricePerCall', 'deposit', 'price', 'deadline', 'payoutAmount', 'refund'])
 
 function toJson(e: IndexedEvent): Record<string, unknown> {
   return Object.fromEntries(Object.entries(e).map(([k, v]) => [k, typeof v === 'bigint' ? v.toString() : v]))

@@ -382,6 +382,54 @@ export async function submitSponsoredOpen(opts: {
   return { hash: tx.txHash, ledger: tx.ledger, opened, via }
 }
 
+/** The arguments of an `open_session` invocation, as an agent's transaction carries them. */
+export type OpenSessionArgs = Omit<OpenTerms, 'token' | 'deposit'> & { agent: string }
+
+/**
+ * Reads the `open_session` call of a transaction (base64 XDR) without judging it: the sponsor
+ * decides from these arguments whether it accepts the session, then checks the whole transaction
+ * against the resulting terms with {@link checkSponsoredOpen}. Throws if it is not one such call.
+ */
+export function decodeOpenSession(transaction: string, networkPassphrase: string): OpenSessionArgs {
+  let tx: Transaction
+  try {
+    const parsed = TransactionBuilder.fromXDR(transaction, networkPassphrase)
+    if (!(parsed instanceof Transaction)) throw new Error('a fee-bump transaction')
+    tx = parsed
+  } catch (e) {
+    throw new Error(`the open_session transaction cannot be read: ${(e as Error).message}`)
+  }
+  const ops = tx.toEnvelope().v1().tx().operations()
+  if (ops.length !== 1 || ops[0]!.body().switch().value !== xdr.OperationType.invokeHostFunction().value) {
+    throw new Error('the transaction must be exactly one contract call')
+  }
+  const func = ops[0]!.body().invokeHostFunctionOp().hostFunction()
+  if (func.switch().value !== xdr.HostFunctionType.hostFunctionTypeInvokeContract().value) throw new Error('not a contract call')
+  const call = func.invokeContract()
+  const a = call.args()
+  if (call.functionName().toString() !== 'open_session' || a.length !== 9) throw new Error('not an open_session')
+  const u32 = (v: xdr.ScVal) => {
+    if (v.switch().value !== xdr.ScValType.scvU32().value) throw new Error('expected a u32')
+    return v.u32()
+  }
+  const u64 = (v: xdr.ScVal) => {
+    if (v.switch().value !== xdr.ScValType.scvU64().value) throw new Error('expected a u64')
+    return BigInt(v.u64().toString())
+  }
+  return {
+    contract: Address.fromScAddress(call.contractAddress()).toString(),
+    agent: scAddress(a[0]!),
+    sessionId: scHex32(a[1]!),
+    serviceId: scHex32(a[2]!),
+    maxCalls: u32(a[3]!),
+    ticketKey: scHex32(a[4]!),
+    sampleK: u32(a[5]!),
+    batchSize: u32(a[6]!),
+    seed: scHex32(a[7]!),
+    expiresAt: u64(a[8]!),
+  }
+}
+
 // ------------------------------------------------------------------------- settling and closing
 
 /** A batch as `settle_batch` takes it: calls `from + 1` through `to`. */
