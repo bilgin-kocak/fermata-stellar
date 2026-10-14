@@ -23,6 +23,7 @@ DEPLOYMENT="${DEPLOYMENT:-$ROOT/deployments/$NETWORK.json}"
 OUT_DIR="${OUT_DIR:-$ROOT/out}"
 FV="$ROOT/target/release/fermata-verdict"
 WASM="$ROOT/target/wasm32v1-none/release/fermata_escrow.wasm"
+ATTEST="$ROOT/apps/attestor/target/release/fermata-attest"
 
 case "$NETWORK" in
 testnet)
@@ -144,6 +145,16 @@ build_tools() {
   (cd "$ROOT" && cargo build --quiet --release -p fermata-verdict)
   [ -f "$WASM" ] || die "no wasm at $WASM"
 }
+
+# The attestor is its own workspace; building from its directory picks up the Rust 1.95.0 its
+# rust-toolchain.toml pins (TLSNotary needs it). The first build takes a few minutes.
+build_attestor() {
+  log "building the attestor (Rust 1.95.0, TLSNotary)"
+  (cd "$ROOT/apps/attestor" && cargo build --quiet --release) || die "attestor build failed"
+  [ -x "$ATTEST" ] || die "no attestor at $ATTEST"
+}
+
+latest_ledger() { stellar ledger latest --network "$NETWORK" --output json | jq -r .sequence; }
 
 # sha256 of stdin as hex (sha256sum on Linux, shasum on macOS).
 sha256_hex() {
