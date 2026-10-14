@@ -109,11 +109,11 @@ async function pay(c: Case) {
   if (c.pay.startsWith('MPP')) {
     const r = Receipt.fromResponse(res) as Receipt.Receipt & Record<string, any>
     c.outcome = r.outcome ?? undefined
-    check(c, 'receipt names the call and its hold', r.callId === c.callId && r.holdTx === c.holdTx && !!c.holdTx)
+    check(c, 'receipt names the call and its hold', r.callId === c.callId && r.holdTx === c.holdTx && !!c.holdTx, `receipt ${r.callId}/${r.holdTx}, headers ${c.callId}/${c.holdTx}`)
   } else {
     c.outcome = res.headers.get('x-fermata-outcome') ?? (res.status === 504 ? 'AWAITING_TIMEOUT' : undefined)
     const settled = decodePaymentResponseHeader(res.headers.get('payment-response') ?? '')
-    check(c, 'PAYMENT-RESPONSE: the hold transaction', settled.success === true && settled.transaction === c.holdTx)
+    check(c, 'PAYMENT-RESPONSE: the hold transaction', settled.success === true && settled.transaction === c.holdTx, `PAYMENT-RESPONSE ${settled.success}/${settled.transaction}, X-Fermata-Hold-Tx ${c.holdTx}`)
   }
   check(c, `outcome ${c.expect.outcome}`, c.outcome === c.expect.outcome, `got ${c.outcome}`)
 }
