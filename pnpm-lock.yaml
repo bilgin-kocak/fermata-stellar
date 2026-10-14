@@ -39,8 +39,8 @@ importers:
         specifier: 2.1.5
         version: 2.1.5(hono@4.13.13)
       '@stellar/mpp':
-        specifier: github:stellar/stellar-mpp-sdk#90394ecdb9ff4e7d48ece35db18fe114ffdc6681
-        version: git+https://git@github.com:stellar/stellar-mpp-sdk.git#90394ecdb9ff4e7d48ece35db18fe114ffdc6681(@stellar/stellar-sdk@16.3.1)(mppx@0.10.1(@x402/core@2.28.0)(hono@4.13.13)(typescript@5.9.3)(viem@2.57.6(typescript@5.9.3)(zod@4.6.7)))
+        specifier: git+https://github.com/stellar/stellar-mpp-sdk.git#90394ecdb9ff4e7d48ece35db18fe114ffdc6681
+        version: git+https://github.com/stellar/stellar-mpp-sdk.git#90394ecdb9ff4e7d48ece35db18fe114ffdc6681(@stellar/stellar-sdk@16.3.1)(mppx@0.10.1(@x402/core@2.28.0)(hono@4.13.13)(typescript@5.9.3)(viem@2.57.6(typescript@5.9.3)(zod@4.6.7)))
       '@stellar/stellar-sdk':
         specifier: ^16.3.1
         version: 16.3.1
@@ -641,8 +641,8 @@ packages:
     resolution: {integrity: sha512-+NmNa7Tk5BI5XFdy/6xGTqAN4J9a9KgCrCGhj2uEUTCBhLkch0M+QbKzNH8zEnejWe0p8w+0q5hUVX6L3OzoVA==}
     engines: {node: '>=20.0.0', pnpm: '>=9.0.0'}
 
-  '@stellar/mpp@git+https://git@github.com:stellar/stellar-mpp-sdk.git#90394ecdb9ff4e7d48ece35db18fe114ffdc6681':
-    resolution: {commit: 90394ecdb9ff4e7d48ece35db18fe114ffdc6681, repo: git@github.com:stellar/stellar-mpp-sdk.git, type: git}
+  '@stellar/mpp@git+https://github.com/stellar/stellar-mpp-sdk.git#90394ecdb9ff4e7d48ece35db18fe114ffdc6681':
+    resolution: {commit: 90394ecdb9ff4e7d48ece35db18fe114ffdc6681, repo: https://github.com/stellar/stellar-mpp-sdk.git, type: git}
     version: 0.7.1
     engines: {node: '>=22'}
     peerDependencies:
@@ -1755,7 +1755,7 @@ snapshots:
 
   '@stellar/js-xdr@4.0.0': {}
 
-  '@stellar/mpp@git+https://git@github.com:stellar/stellar-mpp-sdk.git#90394ecdb9ff4e7d48ece35db18fe114ffdc6681(@stellar/stellar-sdk@16.3.1)(mppx@0.10.1(@x402/core@2.28.0)(hono@4.13.13)(typescript@5.9.3)(viem@2.57.6(typescript@5.9.3)(zod@4.6.7)))':
+  '@stellar/mpp@git+https://github.com/stellar/stellar-mpp-sdk.git#90394ecdb9ff4e7d48ece35db18fe114ffdc6681(@stellar/stellar-sdk@16.3.1)(mppx@0.10.1(@x402/core@2.28.0)(hono@4.13.13)(typescript@5.9.3)(viem@2.57.6(typescript@5.9.3)(zod@4.6.7)))':
     dependencies:
       '@stellar/stellar-sdk': 16.3.1
       mppx: 0.10.1(@x402/core@2.28.0)(hono@4.13.13)(typescript@5.9.3)(viem@2.57.6(typescript@5.9.3)(zod@4.6.7))
