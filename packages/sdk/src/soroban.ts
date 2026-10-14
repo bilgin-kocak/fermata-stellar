@@ -11,7 +11,7 @@ export const NULL_ACCOUNT = 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 
 /** An RPC client; plain HTTP is allowed only for a local URL. */
 export function rpcServer(url: string): rpc.Server {
-  const local = /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?\//.test(url)
+  const local = /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?(\/|$)/.test(url)
   return new rpc.Server(url, { allowHttp: local })
 }
 
