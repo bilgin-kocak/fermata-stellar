@@ -140,7 +140,7 @@ export class EscrowIndexer {
       }
       for (const { token, ledger } of learned) fresh.push(...(await this.backfill(token, ledger)))
       added += await this.commit(fresh, res.cursor)
-      if (res.events.length < limit) return added
+      if (caughtUp(res, limit)) return added
     }
   }
 
@@ -153,7 +153,7 @@ export class EscrowIndexer {
         const ev = this.decode(e)
         if (ev && !this.byId.has(ev.id)) out.push(ev)
       }
-      if (res.events.length < 1_000) return out
+      if (caughtUp(res, 1_000)) return out
       res = await this.server.getEvents({ cursor: res.cursor, filters: this.filters([token], false), limit: 1_000 })
     }
   }
@@ -201,6 +201,15 @@ export class EscrowIndexer {
 /** The ledger a `getEvents` cursor points into (its TOID's upper 32 bits). */
 export function ledgerOfCursor(cursor: string): number {
   return Number(BigInt(cursor.split('-')[0] ?? '0') >> 32n)
+}
+
+/**
+ * Whether a `getEvents` page reached the RPC's latest ledger. A short page alone does not say so:
+ * the RPC scans at most 10,000 ledgers per request (stellar-rpc `LedgerScanLimit`), and a page that
+ * ends at its scan window has fewer events than asked for and a cursor at the window's last ledger.
+ */
+export function caughtUp(res: { events: readonly unknown[]; cursor: string; latestLedger: number }, limit: number): boolean {
+  return res.events.length < limit && ledgerOfCursor(res.cursor) >= res.latestLedger
 }
 
 const BIGINT_FIELDS = new Set(['amount', 'fee', 'pricePerCall'])
