@@ -1,15 +1,29 @@
-# Rust
-/target
+# Rust (the root workspace and the attestor's own workspace)
+target/
+
+# Node
+node_modules/
+dist/
 
 # Soroban test snapshots (regenerated on every test run)
 test_snapshots/
 
 # Local secrets and Stellar CLI state: identities live in the CLI keystore, never in the repo
 .env
+.env.*
+!.env.example
 .stellar/
 *.secret
 
-# Script output
+# Local TLS material: the demo vendor's dev CA and its private key never leave the machine
+certs/
+*.pem
+*.key
+*.crt
+
+# Runtime data: presentations the attestor stores, and script output
+storage/
+*.tlsn
 /out
 
 # Deployments to a local quickstart network are throwaway
