@@ -25,6 +25,11 @@ FV="$ROOT/target/release/fermata-verdict"
 WASM="$ROOT/target/wasm32v1-none/release/fermata_escrow.wasm"
 SESSION_WASM="$ROOT/target/wasm32v1-none/release/fermata_session.wasm"
 ATTEST="$ROOT/apps/attestor/target/release/fermata-attest"
+# Proving attempts per call for the attestor the scripts start. An attempt whose MPC setup stalls
+# (inside TLSNotary) is cut off after a third of its timeout and retried. In a 40-proof soak on a
+# 4-vCPU machine running a local network, 9 of 49 attempts stalled: with 3 attempts, about 1 proof
+# in 160 would get no transcript; with 5, about 1 in 5,000. gateway-cases.sh makes 7 proofs.
+ATTEST_ATTEMPTS="${ATTEST_ATTEMPTS:-5}"
 
 # NET: the network flags every `stellar` command gets. A local quickstart network is named by its
 # RPC URL and passphrase rather than the CLI's built-in `local`, because it may run with another

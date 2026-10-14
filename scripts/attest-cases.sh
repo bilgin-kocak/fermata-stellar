@@ -97,6 +97,7 @@ attestor_args+=(--rpc "$RPC")
 FERMATA_VERIFIER_SECRET="$(verifier_secret)" "$ATTEST" serve "${attestor_args[@]}" \
   --listen "127.0.0.1:$ATTESTOR_PORT" --notary "127.0.0.1:$NOTARY_PORT" --ca "$CA" \
   --predicate "$ROOT/predicates" --storage "$LOGS/presentations" --attempt-timeout-secs 10 \
+  --attempts "$ATTEST_ATTEMPTS" \
   --resolve "vendor.fermata.test:$OK_PORT=127.0.0.1:$OK_PORT" \
   --resolve "vendor.fermata.test:$E500_PORT=127.0.0.1:$E500_PORT" \
   --resolve "vendor.fermata.test:$HANG_PORT=127.0.0.1:$HANG_PORT" >"$LOGS/attestor.log" 2>&1 &
