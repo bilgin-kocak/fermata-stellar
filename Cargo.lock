@@ -953,6 +953,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "fermata-session"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "fermata-escrow",
+ "fermata-verdict",
+ "hex",
+ "proptest",
+ "serde_json",
+ "soroban-sdk",
+]
+
+[[package]]
 name = "fermata-verdict"
 version = "0.1.0"
 dependencies = [

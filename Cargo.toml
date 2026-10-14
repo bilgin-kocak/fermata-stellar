@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["contracts/escrow", "crates/fermata-verdict"]
+members = ["contracts/escrow", "contracts/session", "crates/fermata-verdict"]
 # The attestor is its own workspace (Rust 1.95.0, TLSNotary); see apps/attestor/Cargo.toml.
 exclude = ["apps/attestor"]
 

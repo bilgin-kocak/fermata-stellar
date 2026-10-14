@@ -1,0 +1,27 @@
+[package]
+name = "fermata-session"
+description = "Fermata on Stellar: session escrow, one deposit for many calls, settled in batches on the verifier's statements"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+crate-type = ["lib", "cdylib"]
+doctest = false
+
+[dependencies]
+# `hazmat-address` exposes `Address::to_payload`, used only to read this contract's own 32-byte id
+# for the tickets' and statements' domain separation (never to authenticate anyone).
+soroban-sdk = { workspace = true, features = ["hazmat-address"] }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils", "hazmat-address"] }
+ed25519-dalek.workspace = true
+fermata-escrow = { path = "../escrow" }
+fermata-verdict.workspace = true
+hex.workspace = true
+proptest.workspace = true
+serde_json.workspace = true
