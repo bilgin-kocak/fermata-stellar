@@ -19,16 +19,22 @@ importers:
       '@stellar/stellar-sdk':
         specifier: ^16.3.1
         version: 16.3.1
+      '@x402/core':
+        specifier: 2.28.0
+        version: 2.28.0
       buffer:
         specifier: 6.0.3
         version: 6.0.3
       mppx:
         specifier: 0.10.1
-        version: 0.10.1(typescript@5.9.3)(viem@2.57.6(typescript@5.9.3)(zod@4.6.7))
+        version: 0.10.1(@x402/core@2.28.0)(typescript@5.9.3)(viem@2.57.6(typescript@5.9.3)(zod@4.6.7))
     devDependencies:
       '@types/node':
         specifier: ^22.19.0
         version: 22.20.5
+      '@x402/fetch':
+        specifier: 2.28.0
+        version: 2.28.0
       typescript:
         specifier: ~5.9.3
         version: 5.9.3
@@ -213,6 +219,12 @@ packages:
 
   '@vitest/spy@5.0.4':
     resolution: {integrity: sha512-MZKk/gSkm2q+ICobMxCpH1mA+cCAWm8WV7UhxlqGjq/sJ3AGc1BqFOs5CRVXxH78wQtme9q/NAAgBquj4AcyMw==}
+
+  '@x402/core@2.28.0':
+    resolution: {integrity: sha512-Da/7zKxCKqpBoB4Msc9tFgkAv7tJTD8nG+DSSm+QdXAyJS4PQsmgVSKe17rDJTtlu0pwNbLcOje6MyQ6kaDkig==}
+
+  '@x402/fetch@2.28.0':
+    resolution: {integrity: sha512-kF5IjZIz/izg2TD/Zav+SVj0jtC0zBDfE7WcKCnMZWIsZcLCyL2GgvwXCn7CCSsNjpQ/z3Rz4OqTCA4AaeKySQ==}
 
   abitype@1.2.3:
     resolution: {integrity: sha512-Ofer5QUnuUdTFsBRwARMoWKOH1ND5ehwYhJ3OJ/BQO+StkwQjHw0XyVh4vDttzHB7QOFhPHa/o413PJ82gU/Tg==}
@@ -728,6 +740,9 @@ packages:
       utf-8-validate:
         optional: true
 
+  zod@3.25.76:
+    resolution: {integrity: sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ==}
+
   zod@4.6.7:
     resolution: {integrity: sha512-g8W2D2kU6a8untc053fX1uVBKzM7yqAxW/3zwk83+6RyF2+SKOuV+c0wBDhUwzV1PaGapmZH+rmcUzPf+3CGwg==}
 
@@ -863,6 +878,14 @@ snapshots:
       vite: 8.3.4(@types/node@22.20.5)
 
   '@vitest/spy@5.0.4': {}
+
+  '@x402/core@2.28.0':
+    dependencies:
+      zod: 3.25.76
+
+  '@x402/fetch@2.28.0':
+    dependencies:
+      '@x402/core': 2.28.0
 
   abitype@1.2.3(typescript@5.9.3)(zod@4.6.7):
     optionalDependencies:
@@ -1092,7 +1115,7 @@ snapshots:
     dependencies:
       mime-db: 1.52.0
 
-  mppx@0.10.1(typescript@5.9.3)(viem@2.57.6(typescript@5.9.3)(zod@4.6.7)):
+  mppx@0.10.1(@x402/core@2.28.0)(typescript@5.9.3)(viem@2.57.6(typescript@5.9.3)(zod@4.6.7)):
     dependencies:
       '@stripe/stripe-js': 9.13.0
       eventsource-parser: 3.1.1
@@ -1100,6 +1123,8 @@ snapshots:
       structured-headers: 2.0.3
       viem: 2.57.6(typescript@5.9.3)(zod@4.6.7)
       zod: 4.6.7
+    optionalDependencies:
+      '@x402/core': 2.28.0
     transitivePeerDependencies:
       - typescript
 
@@ -1132,7 +1157,7 @@ snapshots:
       '@noble/hashes': 1.8.0
       '@scure/bip32': 1.7.0
       '@scure/bip39': 1.6.0
-      abitype: 1.2.3(typescript@5.9.3)(zod@4.6.7)
+      abitype: 1.3.0(typescript@5.9.3)(zod@4.6.7)
       eventemitter3: 5.0.1
     optionalDependencies:
       typescript: 5.9.3
@@ -1247,5 +1272,7 @@ snapshots:
   why-is-node-running@3.2.1: {}
 
   ws@8.21.0: {}
+
+  zod@3.25.76: {}
 
   zod@4.6.7: {}

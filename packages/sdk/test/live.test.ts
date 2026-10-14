@@ -6,7 +6,7 @@
 //   FERMATA_DEPLOYMENT=deployments/local.json FERMATA_RPC_URL=http://localhost:8000/rpc pnpm sdk:test
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import { Keypair } from '@stellar/stellar-sdk'
+import { Keypair, xdr } from '@stellar/stellar-sdk'
 import {
   EXPIRY_SKEW_LEDGERS,
   EscrowClient,
@@ -124,5 +124,27 @@ describe.skipIf(!file || !agentSecret || !relayerSecret)('holds on a deployed es
     const held = checkHoldTransaction(tx, terms)
     expect(held.agent).toBe(agent!.publicKey())
     expect(() => checkHoldTransaction(tx, { ...terms, callId: fresh() })).toThrow(/no money for this call/)
+  })
+
+  it('a sponsored hold through a Channels service (a stand-in that implements its documented API)', async () => {
+    const terms = await termsFor()
+    const { transaction } = await signSponsoredHold({ server, networkPassphrase: passphrase, keypair: agent!, terms, validForSeconds: 60 })
+    const latest = (await server.getLatestLedger()).sequence
+    const hold = checkSponsoredHold({ transaction, networkPassphrase: passphrase, terms, latestLedger: latest, maxLedger: latest + 30, sponsors: [] })
+    const requests: unknown[] = []
+    // The stand-in submits func + auth from its own account, as the service does from a channel account.
+    const fetch = (async (_url: string, init: RequestInit) => {
+      const { params } = JSON.parse(init.body as string) as { params: { func: string; auth: string[] } }
+      requests.push(params)
+      const tx = await relayer!.invoke({
+        func: xdr.HostFunction.fromXDR(params.func, 'base64'),
+        auth: params.auth.map((a) => xdr.SorobanAuthorizationEntry.fromXDR(a, 'base64')),
+      })
+      return Response.json({ success: true, data: { transactionId: 'tx-1', hash: tx.txHash, status: 'confirmed' } })
+    }) as unknown as typeof globalThis.fetch
+    const landed = await submitSponsoredHold({ server, networkPassphrase: passphrase, hold, terms, channels: { baseUrl: 'https://channels.test', apiKey: 'k', fetch } })
+    expect(landed.via).toBe('channels')
+    expect(requests).toHaveLength(1)
+    expect((await reader.hold(terms.callId))?.status).toBe(HoldStatus.Held)
   })
 })
