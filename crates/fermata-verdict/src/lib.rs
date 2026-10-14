@@ -13,12 +13,15 @@
 //! vectors in `test-vectors/verdict-v1.json` pin this encoding for both this crate and the contract.
 //!
 //! The crate also derives service ids and computes the registration hashes (`hashes`), so scripts
-//! and, from Milestone 1, the attestor share one implementation.
+//! and, from Milestone 1, the attestor share one implementation. `session` encodes the agent's
+//! tickets and the verifier's batch statements for the session contract (`contracts/session`).
 
 pub mod hashes;
 pub mod hex32;
 pub mod keys;
 pub mod service;
+pub mod session;
+pub mod session_vectors;
 pub mod vectors;
 pub mod verdict;
 

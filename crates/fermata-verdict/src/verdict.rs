@@ -129,7 +129,7 @@ pub fn verify(
         .map_err(|_| Error::Signature)
 }
 
-fn concat_into(out: &mut [u8], parts: &[&[u8]]) {
+pub(crate) fn concat_into(out: &mut [u8], parts: &[&[u8]]) {
     let mut at = 0;
     for part in parts {
         out[at..at + part.len()].copy_from_slice(part);

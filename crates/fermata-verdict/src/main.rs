@@ -3,7 +3,8 @@
 //!
 //! The verifier's secret is read only from the `FERMATA_VERIFIER_SECRET` environment variable (a
 //! Stellar secret seed `S…`, as `stellar keys secret` prints it, or 64 hex characters), never from
-//! a flag, so it stays out of shell history and process listings.
+//! a flag, so it stays out of shell history and process listings. An agent's session ticket key is
+//! read the same way, from `FERMATA_TICKET_SECRET`.
 
 use std::{
     path::PathBuf,
@@ -15,13 +16,15 @@ use clap::{Args, Parser, Subcommand};
 use fermata_verdict::{
     hashes, keys, parse_hex,
     service::{self, Owner},
-    to_hex, vectors,
+    session::{self, Entry, Statement},
+    session_vectors, to_hex, vectors,
     verdict::{self, Domain, Verdict},
     OUTCOME_DELIVERED, OUTCOME_FAILED,
 };
 use serde::Serialize;
 
 const SECRET_ENV: &str = "FERMATA_VERIFIER_SECRET";
+const TICKET_SECRET_ENV: &str = "FERMATA_TICKET_SECRET";
 
 #[derive(Parser)]
 #[command(
@@ -83,6 +86,100 @@ enum Command {
     NotaryKeyHash { key: String },
     /// Print the golden vectors (the content of test-vectors/verdict-v1.json).
     Vectors,
+    /// Print the session golden vectors (the content of test-vectors/session-v1.json).
+    SessionVectors,
+    /// Print the public key (hex and G… address) of the ticket key in FERMATA_TICKET_SECRET.
+    TicketPubkey,
+    /// chain(to) = the chain value `from` extended over the given request hashes, in order.
+    Chain {
+        /// chain(from): the session id for a session's first calls, or the session's stored chain.
+        #[arg(long)]
+        from: String,
+        /// The request hash of each next call, in order.
+        #[arg(long = "request-hash", num_args = 1..)]
+        request_hashes: Vec<String>,
+    },
+    /// Sign the ticket for call `n` with FERMATA_TICKET_SECRET and print JSON: message, signature.
+    Ticket(TicketArgs),
+    /// Sign a batch statement with FERMATA_VERIFIER_SECRET and print JSON: statement, message,
+    /// signature.
+    Statement(StatementArgs),
+    /// The id call `n` of a session is proved against (its X-Fermata-Call header).
+    SessionCallId {
+        /// The session contract: C… address or its 32-byte id in hex.
+        #[arg(long)]
+        contract: String,
+        #[arg(long)]
+        session_id: String,
+        #[arg(long)]
+        n: u32,
+    },
+}
+
+#[derive(Args)]
+struct TicketArgs {
+    #[arg(long)]
+    network_passphrase: String,
+    /// The session contract: C… address or its 32-byte id in hex.
+    #[arg(long)]
+    contract: String,
+    #[arg(long)]
+    session_id: String,
+    #[arg(long)]
+    n: u32,
+    /// chain(n), from `chain`.
+    #[arg(long)]
+    chain: String,
+}
+
+#[derive(Args)]
+struct StatementArgs {
+    #[arg(long)]
+    network_passphrase: String,
+    /// The session contract: C… address or its 32-byte id in hex.
+    #[arg(long)]
+    contract: String,
+    #[arg(long)]
+    session_id: String,
+    #[arg(long)]
+    service_id: String,
+    #[arg(long)]
+    predicate_hash: String,
+    #[arg(long)]
+    from: u32,
+    #[arg(long)]
+    to: u32,
+    /// chain(to).
+    #[arg(long)]
+    chain: String,
+    /// The batch's revealed seed; 32 zero bytes (the default) when nothing is sampled.
+    #[arg(
+        long,
+        default_value = "0000000000000000000000000000000000000000000000000000000000000000"
+    )]
+    seed: String,
+    /// The entries as JSON, `[{"result": 1, "presentation_hash": "…", "response_hash": "…"}, …]`,
+    /// or @path to read them from a file.
+    #[arg(long)]
+    entries: String,
+}
+
+#[derive(Serialize)]
+struct SignedTicket {
+    n: u32,
+    chain: String,
+    message: String,
+    signature: String,
+    public_key: String,
+}
+
+#[derive(Serialize)]
+struct SignedStatement {
+    statement: Statement,
+    entries: Vec<Entry>,
+    message: String,
+    signature: String,
+    public_key: String,
 }
 
 #[derive(Args)]
@@ -233,6 +330,103 @@ fn main() -> Result<()> {
             print!("{}", vectors::document_json());
             Ok(())
         }
+        Command::SessionVectors => {
+            print!("{}", session_vectors::document_json());
+            Ok(())
+        }
+        Command::TicketPubkey => {
+            let public_key = ticket_key_from_env()?.verifying_key().to_bytes();
+            print_json(&PublicKey {
+                public_key: to_hex(&public_key),
+                address: keys::account_address(&public_key),
+            })
+        }
+        Command::Chain {
+            from,
+            request_hashes,
+        } => {
+            let from = parse_hex::<32>(&from).context("--from")?;
+            let hashes = request_hashes
+                .iter()
+                .map(|h| parse_hex::<32>(h).context("--request-hash"))
+                .collect::<Result<Vec<_>>>()?;
+            println!("{}", to_hex(&session::extend_chain(&from, &hashes)));
+            Ok(())
+        }
+        Command::Ticket(args) => {
+            let key = ticket_key_from_env()?;
+            let domain = Domain::new(
+                &args.network_passphrase,
+                keys::contract_id(&args.contract).context("--contract")?,
+            );
+            let session_id = parse_hex::<32>(&args.session_id).context("--session-id")?;
+            let chain = parse_hex::<32>(&args.chain).context("--chain")?;
+            print_json(&SignedTicket {
+                n: args.n,
+                chain: to_hex(&chain),
+                message: to_hex(&session::ticket_message(
+                    &domain,
+                    &session_id,
+                    args.n,
+                    &chain,
+                )),
+                signature: to_hex(&session::sign_ticket(
+                    &key,
+                    &domain,
+                    &session_id,
+                    args.n,
+                    &chain,
+                )),
+                public_key: to_hex(&key.verifying_key().to_bytes()),
+            })
+        }
+        Command::Statement(args) => {
+            let key = signing_key_from_env()?;
+            let domain = Domain::new(
+                &args.network_passphrase,
+                keys::contract_id(&args.contract).context("--contract")?,
+            );
+            let json = match args.entries.strip_prefix('@') {
+                Some(path) => {
+                    std::fs::read_to_string(path).with_context(|| format!("reading {path}"))?
+                }
+                None => args.entries.clone(),
+            };
+            let entries: Vec<Entry> = serde_json::from_str(&json).context("--entries")?;
+            let hash = |name: &str, value: &str| {
+                parse_hex::<32>(value).with_context(|| format!("--{name}"))
+            };
+            let statement = Statement {
+                session_id: hash("session-id", &args.session_id)?,
+                service_id: hash("service-id", &args.service_id)?,
+                predicate_hash: hash("predicate-hash", &args.predicate_hash)?,
+                from: args.from,
+                to: args.to,
+                chain: hash("chain", &args.chain)?,
+                seed: hash("seed", &args.seed)?,
+                entries_hash: session::entries_hash(&entries),
+            };
+            print_json(&SignedStatement {
+                message: to_hex(&session::statement_message(&domain, &statement)),
+                signature: to_hex(&session::sign_statement(&key, &domain, &statement)),
+                public_key: to_hex(&key.verifying_key().to_bytes()),
+                statement,
+                entries,
+            })
+        }
+        Command::SessionCallId {
+            contract,
+            session_id,
+            n,
+        } => {
+            let contract_id = keys::contract_id(&contract).context("--contract")?;
+            let session_id = parse_hex::<32>(&session_id).context("--session-id")?;
+            println!(
+                "{}",
+                to_hex(&session::call_id(&contract_id, &session_id, n))
+            );
+            Ok(())
+        }
     }
 }
 
@@ -274,8 +468,16 @@ impl VerdictArgs {
 }
 
 fn signing_key_from_env() -> Result<ed25519_dalek::SigningKey> {
-    let secret = std::env::var(SECRET_ENV).map_err(|_| {
-        anyhow!("{SECRET_ENV} is not set (a Stellar secret seed S… or 64 hex characters)")
+    key_from_env(SECRET_ENV)
+}
+
+fn ticket_key_from_env() -> Result<ed25519_dalek::SigningKey> {
+    key_from_env(TICKET_SECRET_ENV)
+}
+
+fn key_from_env(name: &str) -> Result<ed25519_dalek::SigningKey> {
+    let secret = std::env::var(name).map_err(|_| {
+        anyhow!("{name} is not set (a Stellar secret seed S… or 64 hex characters)")
     })?;
     Ok(keys::signing_key(&secret)?)
 }
