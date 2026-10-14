@@ -1,0 +1,12 @@
+{
+  "name": "@fermata-stellar/vendor",
+  "license": "Apache-2.0",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Fermata demo vendor: TLS 1.2 quote API that TLSNotary can prove, with CHAOS modes",
+  "scripts": {
+    "certs": "bash gen-certs.sh",
+    "start": "node server.mjs"
+  }
+}
