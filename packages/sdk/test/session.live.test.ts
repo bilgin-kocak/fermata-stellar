@@ -20,6 +20,7 @@ import {
   SessionClient,
   SessionReader,
   SessionStatus,
+  batchSplit,
   checkSponsoredOpen,
   entriesBytes,
   entriesHash,
@@ -186,13 +187,13 @@ describe.skipIf(!d?.session || !agentSecret || !relayerSecret || !verifierSecret
       const agentBefore = await balance(terms.token, agent!.publicKey())
       const { tx, chain } = await settleAll(terms, ticketSeed, [provedEntry(true, fresh(), fresh()), provedEntry(false, fresh(), fresh())])
       const price = BigInt(d.service.price_per_call)
-      const fee = (price * BigInt(opened!.feeBps)) / 10_000n
+      const { payoutAmount, fee, refund } = batchSplit(price, opened!.feeBps, 1, 2)
       const events = sessionEventsOf(tx, contract)
       const settled = events.find((e): e is BatchSettled => e.name === 'batch_settled')
-      expect(settled).toMatchObject({ from: 0, to: 2, delivered: 1, failed: 1, paid: 1, payoutAmount: price - fee, fee, refund: price, chain })
+      expect(settled).toMatchObject({ from: 0, to: 2, delivered: 1, failed: 1, paid: 1, payoutAmount, fee, refund, chain })
       expect(events.at(-1)).toMatchObject({ name: 'session_closed', refund: 0n })
-      expect(await balance(terms.token, d.service.payout)).toBe(payoutBefore + price - fee)
-      expect(await balance(terms.token, agent!.publicKey())).toBe(agentBefore + price)
+      expect(await balance(terms.token, d.service.payout)).toBe(payoutBefore + payoutAmount)
+      expect(await balance(terms.token, agent!.publicKey())).toBe(agentBefore + refund)
       expect(await reader.session(terms.sessionId)).toMatchObject({ status: SessionStatus.Closed, settled: 2, chain })
     })
 

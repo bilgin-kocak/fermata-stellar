@@ -19,7 +19,9 @@ root).
     `statementMessage`, `signStatement`, `verifyStatement`, `sessionCallId`, `isSampled` and
     `paidCalls`;
   - hashes: `serviceId`, `requestHash`, `originHash`, `notaryKeyHash` and `predicateHash`. These
-    and their vectors are ported from Fermata's `packages/sdk` @ `d7cc642`.
+    and their vectors are ported from Fermata's `packages/sdk` @ `d7cc642`;
+  - fees: `releaseSplit` (what `release` pays the vendor and the treasury) and `batchSplit` (what
+    `settle_batch` pays, with the fee rounded down per call), for showing a split before it settles.
 - **Holds and sessions on chain.**
   - A sponsored hold: the agent signs only the authorization of `hold` (`signSponsoredHold`); the
     sponsor checks it (`checkSponsoredHold`, `simulateSponsoredHold`) and submits it
@@ -94,7 +96,7 @@ new session; what is left of the old one returns to it after that session's dead
 
 ```sh
 pnpm sdk:typecheck
-pnpm sdk:test      # 81 tests: parity with test-vectors/, holds, sessions, x402, Channels,
+pnpm sdk:test      # 91 tests: parity with test-vectors/, holds, sessions, x402, Channels,
                    # the indexer, reconciliation and scores
 # the 19 live tests, against a deployment (scripts/deploy-testnet.sh writes the file); they have
 # run against a local network in CI, not against testnet yet:

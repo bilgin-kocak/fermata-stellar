@@ -145,7 +145,7 @@ of [`docs/session-escrow.md`](docs/session-escrow.md#10-phase-1-specification).
 | Session contract: `open_session`, `settle_batch`, `close_session`, events (phase 1 of the session design) | **Implemented and tested on Stellar** ([`contracts/session`](contracts/session), 54 tests, plus a cost test on the built Wasm) |
 | Stellar verdict and session encodings: Ed25519 signer, strict verification, CLI, golden vectors | **Implemented and tested on Stellar** ([`crates/fermata-verdict`](crates/fermata-verdict), 44 tests; [`test-vectors/`](test-vectors)) |
 | TLSNotary attestor: proving, notary, 7 binding checks, predicates, HTTP API, offline re-verification; session calls and batch statements | **Implemented and tested on Stellar** ([`apps/attestor`](apps/attestor): 26 unit tests and two integration tests with real MPC-TLS sessions; its verdicts and its batch statement settle on the contracts in the contract tests) |
-| TypeScript SDK: typed escrow and session clients, verdict and session encodings, registration hashes, holds and session openings, the MPP method (`charge` and `session`) and the x402 scheme, indexer, reconciliation, scores | **Implemented and tested on Stellar** ([`packages/sdk`](packages/sdk): 81 tests, plus 19 live tests against a deployment) |
+| TypeScript SDK: typed escrow and session clients, verdict and session encodings, registration hashes, holds and session openings, the MPP method (`charge` and `session`) and the x402 scheme, indexer, reconciliation, scores, fee splits | **Implemented and tested on Stellar** ([`packages/sdk`](packages/sdk): 91 tests, plus 19 live tests against a deployment) |
 | Deployment and the canonical cases (`scripts/`) | **Implemented and tested on Stellar**, on a local network (protocol 29) and in CI. The testnet run is pending; see [Live on testnet](#live-on-testnet). <br>• `demo-cases.sh` (M0, script-signed verdicts): 3/3 <br>• `attest-cases.sh` (M1, real TLSNotary proofs): 3/3 <br>• `session-cases.sh` (M2 sessions, script-signed statements): 22 checks <br>• `gateway-cases.sh` (M2, paid through the gateway, a session included): 11 calls, 55 checks |
 | Gateway: the `fermata` MPP method and x402 scheme (escrowed), Stellar's MPP Charge and x402 `exact` (unprotected), sessions through MPP, the sweeper, the read API | **Implemented and tested on Stellar** ([`apps/gateway`](apps/gateway): 32 tests, and `gateway-cases.sh`) |
 | Holds submitted through OpenZeppelin's Channels service; `exact` through OpenZeppelin's x402 facilitator | **Implemented, not run against OpenZeppelin's hosted services**, which need testnet and an API key. The Channels client passes a live test against a stand-in that implements the documented API; `exact` is tested with a facilitator in the gateway's process. |
@@ -238,7 +238,7 @@ cargo test --release --test attest end_to_end -- --ignored --nocapture   # real 
                                                   # holds and for session calls (node, openssl)
 cd ../..
 
-pnpm install && pnpm sdk:typecheck && pnpm sdk:test   # 81 tests; the live suites need a deployment
+pnpm install && pnpm sdk:typecheck && pnpm sdk:test   # 91 tests; the live suites need a deployment
 pnpm gateway:typecheck && pnpm gateway:test           # 32 tests
 pnpm dashboard:build                                  # apps/dashboard/dist, served by the gateway
 ```
