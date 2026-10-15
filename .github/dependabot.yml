@@ -1,4 +1,5 @@
-# Weekly update PRs, minor and patch versions grouped into one PR per ecosystem. Majors come alone.
+# Weekly update PRs, minor and patch versions grouped into one PR per ecosystem. Majors come alone,
+# except for cargo.
 #
 # Not covered here: apps/attestor, whose dependencies follow TLSNotary's pin (tlsn by git rev,
 # stellar-xdr at the version soroban-sdk uses), and the Stellar CLI and quickstart image that
@@ -14,7 +15,9 @@ updates:
       actions:
         patterns: ["*"]
 
-  # The root workspace: contracts/escrow, contracts/session and crates/fermata-verdict.
+  # The root workspace: contracts/escrow, contracts/session and crates/fermata-verdict. No majors:
+  # the signing and hashing crates (ed25519-dalek, sha2, sha3, stellar-strkey) stay on the versions
+  # soroban-sdk and the attestor use, so they move by hand together with soroban-sdk.
   - package-ecosystem: cargo
     directory: /
     schedule:
@@ -22,6 +25,9 @@ updates:
     groups:
       cargo:
         update-types: [minor, patch]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
 
   # The pnpm workspace: packages/sdk, apps/gateway, apps/dashboard and apps/vendor.
   - package-ecosystem: npm
