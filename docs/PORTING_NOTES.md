@@ -296,8 +296,8 @@ taken (2026-10-13).
   - The only role is the escrow owner, who sets the fee and the treasury.
 - **Q2. Timeout event.** A distinct `timed_out` event (status `TimedOut`), instead of `refunded`
   with a zero presentation hash.
-- **Q3. Branch.** Work is pushed to the session branch `claude/affectionate-shannon-mbtrvx` and
-  merged into `main` by the repository owner.
+- **Q3. Branch.** Work lands on `main`, the default branch. Until 2026-10-15 it was pushed to a
+  session branch and merged into `main` by the repository owner.
 
 ## 8. Reuse and licensing
 
