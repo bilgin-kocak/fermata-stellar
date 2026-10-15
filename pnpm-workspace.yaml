@@ -6,3 +6,7 @@ packages:
 # section 10) and built from source on install.
 onlyBuiltDependencies:
   - "@stellar/mpp"
+# @stellar/stellar-sdk 16 pins axios 1.18.0, which has 12 advisories fixed in 1.20.0. Only versions
+# below 1.20.0 are replaced, so this does nothing once the SDK (17.1 and later) moves past them.
+overrides:
+  "axios@<1.20.0": "^1.20.0"
