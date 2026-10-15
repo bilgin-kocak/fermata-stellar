@@ -1,0 +1,33 @@
+# Weekly update PRs, minor and patch versions grouped into one PR per ecosystem. Majors come alone.
+#
+# Not covered here: apps/attestor, whose dependencies follow TLSNotary's pin (tlsn by git rev,
+# stellar-xdr at the version soroban-sdk uses), and the Stellar CLI and quickstart image that
+# ci.yml pins by version and hash. Those move by hand, together.
+version: 2
+updates:
+  # The actions in ci.yml are pinned by commit hash; Dependabot updates the hash and the comment.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # The root workspace: contracts/escrow, contracts/session and crates/fermata-verdict.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      cargo:
+        update-types: [minor, patch]
+
+  # The pnpm workspace: packages/sdk, apps/gateway, apps/dashboard and apps/vendor.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      npm:
+        update-types: [minor, patch]
